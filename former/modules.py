@@ -21,7 +21,6 @@ class SelfAttention(nn.Module):
         self.unifyheads = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, x):
-
         b, t, e = x.size()
         assert e == self.embedding_dim, f'Input embedding dim ({e}) should match layer embedding dim ({self.embedding_dim})'
 
