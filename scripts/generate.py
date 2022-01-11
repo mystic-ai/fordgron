@@ -54,13 +54,13 @@ def sample_sequence(
             print(str(chr(c)), end="", flush=True)
         print()
 
+    print("Generation:")
     for _ in range(length):
         input = sequence[-max_context:]
         output = transformer(input[None, :])
         c = sample(output[0, -1, :], temperature)
 
         if verbose:
-            print("Generation:")
             print(str(chr(max(32, c))), end="", flush=True)
 
         sequence = torch.cat([sequence, c[None]], dim=0)
