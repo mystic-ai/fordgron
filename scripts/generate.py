@@ -114,15 +114,15 @@ def infer(arg):
 
         if i != 0 and (i % arg.test_every == 0 or i == arg.num_batches - 1):
             with torch.no_grad():
-                seedfr = random.randint(0, data_test.size(0) - arg.context)
-                seed = data_test[seedfr : seedfr + arg.context].to(torch.long)
+                seedfr = random.randint(0, data_test.size(0) - arg.seq_len)
+                seed = data_test[seedfr : seedfr + arg.seq_len].to(torch.long)
                 if torch.cuda.is_available():
                     seed = seed.cuda()
 
                 sample_sequence(
                     transformer,
                     seed,
-                    max_context=arg.context,
+                    max_context=arg.seq_len,
                     verbose=True,
                     length=arg.sample_length,
                 )
