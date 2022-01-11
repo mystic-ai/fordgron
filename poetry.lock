@@ -371,6 +371,7 @@ python-versions = ">=3.6.2"
 typing-extensions = "*"
 
 [[package]]
+<<<<<<< HEAD
 name = "torchtext"
 version = "0.11.1"
 description = "Text utilities and datasets for PyTorch"
@@ -385,6 +386,8 @@ torch = "*"
 tqdm = "*"
 
 [[package]]
+=======
+>>>>>>> main
 name = "tqdm"
 version = "4.62.3"
 description = "Fast, Extensible Progress Meter"
@@ -401,6 +404,7 @@ notebook = ["ipywidgets (>=6)"]
 telegram = ["requests"]
 
 [[package]]
+<<<<<<< HEAD
 name = "transformers"
 version = "4.15.0"
 description = "State-of-the-art Natural Language Processing for TensorFlow 2.0 and PyTorch"
@@ -457,6 +461,8 @@ torchhub = ["filelock", "huggingface-hub (>=0.1.0,<1.0)", "importlib-metadata", 
 vision = ["pillow"]
 
 [[package]]
+=======
+>>>>>>> main
 name = "typing-extensions"
 version = "4.0.1"
 description = "Backported and Experimental Type Hints for Python 3.6+"
@@ -487,8 +493,13 @@ python-versions = "*"
 
 [metadata]
 lock-version = "1.1"
+<<<<<<< HEAD
 python-versions = "^3.8"
 content-hash = "aa6c4fcb6c32dee45da20dd996bb7483b3f924119c5311bd0b3d29d009cceffa"
+=======
+python-versions = "^3.9"
+content-hash = "7653930e1973ee2ab8e209279e1c66b9da5c2cb554a75acf3abb350ad0de9f04"
+>>>>>>> main
 
 [metadata.files]
 atomicwrites = [
@@ -796,6 +807,7 @@ torch = [
     {file = "torch-1.10.1-cp39-none-macosx_10_9_x86_64.whl", hash = "sha256:26b6dfbe21e247e67c615bfab0017ec391ed1517f88bbeea6228a49edd24cd88"},
     {file = "torch-1.10.1-cp39-none-macosx_11_0_arm64.whl", hash = "sha256:5644280d88c5b6de27eacc0d911f968aad41a4bab297af4df5e571bc0927d3e4"},
 ]
+<<<<<<< HEAD
 torchtext = [
     {file = "torchtext-0.11.1-cp36-cp36m-macosx_10_9_x86_64.whl", hash = "sha256:7189e0047baf92ad8d73c7d08859b82f1ca9ccbedf90db1172407ef4233126eb"},
     {file = "torchtext-0.11.1-cp36-cp36m-manylinux1_x86_64.whl", hash = "sha256:e443358d3b5a5102b2e2b68acbcd14d10410eec64134d0141aa307233a96fe5e"},
@@ -814,14 +826,19 @@ torchtext = [
     {file = "torchtext-0.11.1-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:5db6ca8e2ac9eecbf734ebc9d2a9097ad6aeb2b625a0b421b468816fc4351a86"},
     {file = "torchtext-0.11.1-cp39-cp39-win_amd64.whl", hash = "sha256:2a99d128e342dc7e234f3a6dffbd2ba04e7478f32456cb7011aaf23038b1e03f"},
 ]
+=======
+>>>>>>> main
 tqdm = [
     {file = "tqdm-4.62.3-py2.py3-none-any.whl", hash = "sha256:8dd278a422499cd6b727e6ae4061c40b48fce8b76d1ccbf5d34fca9b7f925b0c"},
     {file = "tqdm-4.62.3.tar.gz", hash = "sha256:d359de7217506c9851b7869f3708d8ee53ed70a1b8edbba4dbcb47442592920d"},
 ]
+<<<<<<< HEAD
 transformers = [
     {file = "transformers-4.15.0-py3-none-any.whl", hash = "sha256:148fdfc68d703d61f1651c98b228f10c36620eef41722911ee531bfdd4941f18"},
     {file = "transformers-4.15.0.tar.gz", hash = "sha256:9de810ba076a852d0417b37b9dda64ac627c5fae0126561f0e1e074a32cd6f4a"},
 ]
+=======
+>>>>>>> main
 typing-extensions = [
     {file = "typing_extensions-4.0.1-py3-none-any.whl", hash = "sha256:7f001e5ac290a0c0401508864c7ec868be4e701886d5b573a9528ed3973d9d3b"},
     {file = "typing_extensions-4.0.1.tar.gz", hash = "sha256:4ca091dea149f945ec56afb48dae714f21e8692ef22a395223bcd328961b6a0e"},
