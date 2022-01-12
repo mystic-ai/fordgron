@@ -6,6 +6,7 @@ import random
 from pathlib import Path
 from typing import List
 
+from lm_dataformat import Reader
 import ftfy
 from transformers import GPT2TokenizerFast
 from tqdm import tqdm
@@ -77,18 +78,20 @@ def get_files(input_path):
     supported_types = ["jsonl.zst", ".txt", ".xz", ".tar.gz"]
 
     if input_path.is_dir():
-        files = [list(Path(input_path).glob(f"*{type}")) for type in supported_types]
-        files = [f for sublist in files for f in sublist]
+        print("Input is a directory.")
+        subfiles_by_type = [list(Path(input_path).glob(f"*{type}")) for type in supported_types]
+        files = [sub_file for subfile_group in subfiles_by_type for sub_file in subfile_group]
         assert files, f"No files with supported types found in directory: {input_path}"
     elif input_path.is_file():
-        assert any(
-            str(input_path).endswith(type) for type in supported_types
+        print("Input is a single file.")
+        assert (
+            str(input_path).endswith(f_type) for f_type in supported_types
         ), f"Input file type must be one of: {supported_types}"
         files = [input_path]
     else:
         raise FileNotFoundError(f"No such file or directory: {input_path=}")
 
-    return [str(f) for f in files]
+    return [str(file) for file in files]
 
 
 def wikitext_detokenizer(string):
@@ -124,23 +127,12 @@ def wikitext_detokenizer(string):
 
     return string
 
-def write_to_file(writer, data):
-    """
-    writes data to tfrecord file
-    """
-    feature = {
-        "text": _int64_feature(data)
-    }
-    tf_example = tf.train.Example(features=tf.train.Features(feature=feature))
-    writer.write(tf_example.SerializeToString())
-
-
 def write_pt(sequences, file_path):
     torch.save(sequences, file_path)
 
 
 def split_list(l, n):
-    # splits list/string into n size chunks
+    # splits list/string into n (or l if l < n) size chunks
     return [l[i:i + n] for i in range(0, len(l), n)]
 
 
@@ -153,61 +145,58 @@ def enforce_min_unique(seqs, min_unique_tokens, enc, verbose=False):
             print(f"excluding with {len(set(seq))} unique tokens:\n\n{repr(text)}\n\n")
 
 
-def eot_splitting_generator(string_iterable, tokenizer):
-    """
-    Given strings, splits them internally on <|endoftext|> and yields (generally more) strings
-    """
+def split_by_eot_token(string_iterable, tokenizer):
     for doc in string_iterable:
         for d in doc.split(tokenizer.eos_token):
             if len(d) > 0:
                 yield d
 
 
-def prep_and_tokenize_generator(string_iterable, tokenizer, normalize_with_ftfy, normalize_with_wikitext_detokenize):
-    for doc in string_iterable:
+def prep_and_tokenize_generator(articles, tokenizer, normalize_with_ftfy, normalize_with_wikitext_detokenize):
+    for article in tqdm(articles):
         if normalize_with_ftfy:
-            doc = ftfy.fix_text(doc, normalization='NFKC')
+            article = ftfy.fix_text(article, normalization='NFKC')
         if normalize_with_wikitext_detokenize:
-            doc = wikitext_detokenizer(doc)
-        tokens = tokenizer.encode(doc) + [tokenizer.eos_token_id]
+            article = wikitext_detokenizer(article)
+        tokens = tokenizer.encode(article) + [tokenizer.eos_token_id]
         yield tokens
 
 
-def file_to_tokenized_docs_generator(file_path, tokenizer, args):
-    with open(file_path, "r") as file:
-      string_iterable = [file.read()]
-      string_iterable = eot_splitting_generator(string_iterable, tokenizer)
-      token_list_gen = prep_and_tokenize_generator(string_iterable,
-                                                  tokenizer,
-                                                  normalize_with_ftfy=args.normalize_with_ftfy,
-                                                  normalize_with_wikitext_detokenize=args.normalize_with_wikitext_detokenize
-                                                  )
-      return token_list_gen
+def tokenize_file_generator(file_path, tokenizer, args):
+    reader = Reader(file_path)
+    articles_as_strings = reader.stream_data(threaded=False)
+    articles_as_strings = split_by_eot_token(articles_as_strings, tokenizer)
+    return prep_and_tokenize_generator(articles_as_strings,
+                                                tokenizer,
+                                                normalize_with_ftfy=args.normalize_with_ftfy,
+                                                normalize_with_wikitext_detokenize=args.normalize_with_wikitext_detokenize
+                                                )
 
 
-def read_files_to_tokenized_docs(files, args, encoder):
-    docs = []
+def tokenize_articles(raw_files, args, tokenizer):
+    # tokenized_articles will become one 'super' container of all individual documents
+    tokenized_articles = []
 
     if args.preserve_data_order:
-        files = sorted(files)
+        raw_files = sorted(raw_files)
     else:
-        random.shuffle(files)
+        print("Shuffling the files around.")
+        random.shuffle(raw_files)
 
-    for f in tqdm(files, mininterval=10, smoothing=0, desc="reading/tokenizing files"):
-        docs.extend(file_to_tokenized_docs_generator(f, encoder, args))
-
+    for _ in tqdm(raw_files, mininterval=10, smoothing=0, desc="reading/tokenizing files"):
+        tokenized_articles.extend(tokenize_file_generator(raw_files, tokenizer, args))
+        
     if not args.preserve_data_order:
-        # shuffle at individual document level
-        random.shuffle(docs)
+        print("Shuffling the articles around, after tokenization.")
+        random.shuffle(tokenized_articles)
 
-    return docs
+    return tokenized_articles
 
 
-def arrays_to_sequences(token_list_iterable, sequence_length=2049):
+def arrays_to_sequences(token_list, sequence_length=2049):
     accumulating_sequence = []
-    for l in token_list_iterable:
+    for l in token_list:
         accumulating_sequence.extend(l)
-
         if len(accumulating_sequence) > sequence_length:
             chunks = split_list(accumulating_sequence, sequence_length)
             yield from chunks[:-1]
@@ -217,8 +206,8 @@ def arrays_to_sequences(token_list_iterable, sequence_length=2049):
         yield accumulating_sequence
 
 
-def chunk_and_finalize(arrays, args, tokenizer):
-    sequences = list(arrays_to_sequences(arrays))
+def chunk_and_finalize(article_arrays, args, tokenizer):
+    sequences = list(arrays_to_sequences(article_arrays))
 
     full_seqs, trailing_data = sequences[:-1], sequences[-1]
 
@@ -231,22 +220,25 @@ def chunk_and_finalize(arrays, args, tokenizer):
     return full_seqs, trailing_data
 
 
-def create_pt_files(files, args):
+def convert_files_to_pt(raw_files, args):
+    GPT2TokenizerFast.max_model_input_sizes['gpt2'] = 1e20
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    print("Tokenizer loaded.")
 
     random.seed(args.seed)
 
     # first
     sequences = []
-    docs = read_files_to_tokenized_docs(files, args, tokenizer)
-    full_seqs, trailing_data = chunk_and_finalize(docs, args, tokenizer)
+    tokenized_articles = tokenize_articles(raw_files, args, tokenizer)
+    full_seqs, trailing_data = chunk_and_finalize(tokenized_articles, args, tokenizer)
     sequences.extend(full_seqs)
+    print(f"There are {len(sequences)} sequences.")
 
     # repacks
     for repeat_idx in range(1, args.num_repacks):
         if not args.preserve_data_order:
-            random.shuffle(docs)
-            full_seqs, trailing_data = chunk_and_finalize(docs, args, tokenizer)
+            random.shuffle(tokenized_articles)
+            full_seqs, trailing_data = chunk_and_finalize(tokenized_articles, args, tokenizer)
         else:
             # if we're preserving data order, we can still "repack" by shifting everything
             # with the trailing data of the last epoch at the beginning
@@ -256,18 +248,19 @@ def create_pt_files(files, args):
         sequences.extend(full_seqs)
 
     # final
-    print(f"dropped {len(trailing_data)} tokens of trailing data")
+    print(f"dropped {len(trailing_data)} trailing tokens")
 
     total_sequence_len = len(sequences)
 
     new_file_path = os.path.join(args.output_dir, f"{args.name}_{total_sequence_len}.pt")
+    print("writing to drive")
     write_pt(sequences, new_file_path)
+    print(f"{args.name}_{total_sequence_len}.pt saved to drive")
 
 
 if __name__ == "__main__":
     args = parse_args()
-
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
     files = get_files(args.input_path)
-    results = create_pt_files(files, args)
+    convert_files_to_pt(files, args)

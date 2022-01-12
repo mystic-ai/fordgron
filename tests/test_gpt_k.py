@@ -1,4 +1,4 @@
-from gpt_k import __version__
+from k import __version__
 
 
 def test_version():
