@@ -3,6 +3,22 @@ from torch import nn
 import torch.nn.functional as F
 
 
+class PositionalEmbedding(nn.Module):
+    def __init__(self, embedding_dim, dropout, seq_len):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.P = torch.zeros([1, seq_len, embedding_dim])
+        X = torch.arange(seq_len, dtype=torch.float32).reshape(
+            -1, 1) / torch.pow(10000, torch.arange(
+            0, embedding_dim, 2, dtype=torch.float32) / embedding_dim)
+        self.P[:, :, 0::2] = torch.sin(X)
+        self.P[:, :, 1::2] = torch.cos(X)
+
+    def forward(self, X):
+        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        return self.dropout(X)
+
+
 class SelfAttention(nn.Module):
     def __init__(self, embedding_dim, num_heads, mask):
         super().__init__()
@@ -18,7 +34,7 @@ class SelfAttention(nn.Module):
         self.unifyheads = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, x):
-        batch_len, qkv_len, input_embedding_dim = x.size()
+        batch_len, seq_len, input_embedding_dim = x.size()
         assert (
             input_embedding_dim == self.embedding_dim
         ), f"Input embedding dim ({input_embedding_dim}) should match layer embedding dim ({self.embedding_dim})"
@@ -29,43 +45,43 @@ class SelfAttention(nn.Module):
         keys = self.tokeys(x)
         values = self.tovalues(x)
 
-        queries = queries.view(batch_len, qkv_len, self.num_heads, num_layers)
-        keys = keys.view(batch_len, qkv_len, self.num_heads, num_layers)
-        values = values.view(batch_len, qkv_len, self.num_heads, num_layers)
+        queries = queries.view(batch_len, seq_len, self.num_heads, num_layers)
+        keys = keys.view(batch_len, seq_len, self.num_heads, num_layers)
+        values = values.view(batch_len, seq_len, self.num_heads, num_layers)
 
         queries = (
             queries.transpose(1, 2)
             .contiguous()
-            .view(batch_len * self.num_heads, qkv_len, num_layers)
+            .view(batch_len * self.num_heads, seq_len, num_layers)
         )
         keys = (
             keys.transpose(1, 2)
             .contiguous()
-            .view(batch_len * self.num_heads, qkv_len, num_layers)
+            .view(batch_len * self.num_heads, seq_len, num_layers)
         )
         values = (
             values.transpose(1, 2)
             .contiguous()
-            .view(batch_len * self.num_heads, qkv_len, num_layers)
+            .view(batch_len * self.num_heads, seq_len, num_layers)
         )
 
         queries = queries / (input_embedding_dim ** (1 / 4))
         keys = keys / (input_embedding_dim ** (1 / 4))
         dot = torch.bmm(queries, keys.transpose(1, 2))
-        assert dot.size() == (batch_len * self.num_heads, qkv_len, qkv_len)
+        assert dot.size() == (batch_len * self.num_heads, seq_len, seq_len)
         if self.mask:
             height, width = dot.size(-2), dot.size(-1)
             indices = torch.triu_indices(height, width)
             dot[..., indices[0], indices[1]] = float("-inf")
-
+           
         dot = F.softmax(dot, dim=2)
         out = torch.bmm(dot, values).view(
-            batch_len, self.num_heads, qkv_len, num_layers
+            batch_len, self.num_heads, seq_len, num_layers
         )
         out = (
             out.transpose(1, 2)
             .contiguous()
-            .view(batch_len, qkv_len, num_layers * self.num_heads)
+            .view(batch_len, seq_len, num_layers * self.num_heads)
         )
         return self.unifyheads(out)
 

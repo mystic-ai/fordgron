@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .modules import TransformerBlock
+from .modules import TransformerBlock, PositionalEmbedding
 
 
 class Transformer(nn.Module):
@@ -21,8 +21,8 @@ class Transformer(nn.Module):
         super().__init__()
         self.device = device
         self.vocab_len = vocab_len
-        self.token_embedding = nn.Embedding(embedding_dim, vocab_len)
-        self.positional_embedding = nn.Embedding(seq_len, embedding_dim)
+        self.embedding = nn.Embedding(vocab_len, embedding_dim)
+        self.positional_embedding = PositionalEmbedding(embedding_dim, 0, seq_len)
 
         modules = [
             TransformerBlock(
@@ -37,13 +37,10 @@ class Transformer(nn.Module):
         self.model = nn.Sequential(*modules)
         self.output_probs = nn.Linear(embedding_dim, vocab_len)
 
-    def forward(self, x):
-        tokens = self.token_embedding(x)
-        b, t, e = tokens.size()
-        positions = self.positional_embedding(torch.arange(t, device=self.device))[
-            None, :, :
-        ].expand(b, t, e)
-        x = tokens + positions
-        x = self.model(x)
-        y = self.output_probs(x.view(b * t, e)).view(b, t, self.vocab_len)
+    def forward(self, input):
+        tokens = self.embedding(input)
+        batch_len, seq_len, embedding_dim = tokens.size()
+        positions = self.positional_embedding(tokens)
+        x = self.model(positions)
+        y = self.output_probs(positions.view(batch_len * seq_len, embedding_dim)).view(batch_len, seq_len, self.vocab_len)
         return F.log_softmax(y, dim=2)
