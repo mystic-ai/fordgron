@@ -1,4 +1,4 @@
-from k import model
+from gpt_k import model
 
 import torch
 from torch import nn
