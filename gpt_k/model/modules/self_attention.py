@@ -2,23 +2,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
-class PositionalEmbedding(nn.Module):
-    def __init__(self, embedding_dim, dropout, seq_len):
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        self.P = torch.zeros([1, seq_len, embedding_dim])
-        X = torch.arange(seq_len, dtype=torch.float32).reshape(
-            -1, 1) / torch.pow(10000, torch.arange(
-            0, embedding_dim, 2, dtype=torch.float32) / embedding_dim)
-        self.P[:, :, 0::2] = torch.sin(X)
-        self.P[:, :, 1::2] = torch.cos(X)
-
-    def forward(self, X):
-        X = X + self.P[:, :X.shape[1], :].to(X.device)
-        return self.dropout(X)
-
-
 class SelfAttention(nn.Module):
     def __init__(self, embedding_dim, num_heads, mask):
         super().__init__()
@@ -39,7 +22,7 @@ class SelfAttention(nn.Module):
             input_embedding_dim == self.embedding_dim
         ), f"Input embedding dim ({input_embedding_dim}) should match layer embedding dim ({self.embedding_dim})"
 
-        num_layers = input_embedding_dim // self.num_heads
+        num_layers = self.embedding_dim // self.num_heads
 
         queries = self.toqueries(x)
         keys = self.tokeys(x)
@@ -65,9 +48,7 @@ class SelfAttention(nn.Module):
             .view(batch_len * self.num_heads, seq_len, num_layers)
         )
 
-        queries = queries / (input_embedding_dim ** (1 / 4))
-        keys = keys / (input_embedding_dim ** (1 / 4))
-        dot = torch.bmm(queries, keys.transpose(1, 2))
+        dot = torch.bmm(queries, keys.transpose(1, 2)) / torch.sqrt(keys.size()[-1])
         assert dot.size() == (batch_len * self.num_heads, seq_len, seq_len)
         if self.mask:
             height, width = dot.size(-2), dot.size(-1)
@@ -84,34 +65,3 @@ class SelfAttention(nn.Module):
             .view(batch_len, seq_len, num_layers * self.num_heads)
         )
         return self.unifyheads(out)
-
-
-class TransformerBlock(nn.Module):
-    def __init__(
-        self,
-        embedding_dim,
-        num_heads,
-        mask,
-        dropout,
-        forward_expansion,
-    ):
-        super().__init__()
-        self.attention = SelfAttention(embedding_dim, num_heads, mask)
-        self.mask = mask
-        self.norm1 = nn.LayerNorm(embedding_dim)
-        self.norm2 = nn.LayerNorm(embedding_dim)
-        self.ff = nn.Sequential(
-            nn.Linear(embedding_dim, forward_expansion * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(forward_expansion * embedding_dim, embedding_dim),
-        )
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        attended = self.attention(x)
-        x = self.norm1(attended + x)
-        x = self.dropout(x)
-        fedforward = self.ff(x)
-        x = self.norm2(fedforward + x)
-        x = self.dropout(x)
-        return x
