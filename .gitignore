@@ -132,3 +132,4 @@ dmypy.json
 *jsonl.zst
 *pt
 generate.ipynb
+wandb/

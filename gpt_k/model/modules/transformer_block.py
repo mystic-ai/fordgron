@@ -1,8 +1,16 @@
 from torch import nn
 import torch.nn.functional as F
-from self_attention import SelfAttention
+from .self_attention import SelfAttention
 
 class TransformerBlock(nn.Module):
+    """
+    Attributes:
+        attention: SelfAttention - scaled multi-head attention layer
+        norm1: nn.LayerNorm
+        ff: nn.Sequential - feedforward network
+        norm2: nn.LayerNorm
+        dropout: nn.Dropout
+    """
     def __init__(
         self,
         embedding_dim,
@@ -22,11 +30,17 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(embedding_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        attended = self.attention(x)
-        x = self.norm1(attended + x)
-        x = self.dropout(x)
-        fedforward = self.ff(x)
-        x = self.norm2(fedforward + x)
-        x = self.dropout(x)
-        return x
+    def forward(self, X):
+        """
+        The size of X remains the same as it passes through the transformer block. 
+        
+        Args:
+            X: torch.tensor [batch_size, seq_len, embedding_dim]
+        """
+        attended = self.attention(X)
+        X = self.norm1(attended + X)
+        X = self.dropout(X)
+        fedforward = self.ff(X)
+        X = self.norm2(fedforward + X)
+        X = self.dropout(X)
+        return X

@@ -9,7 +9,7 @@ class PileDataset(Dataset):
 
     def __init__(
         self,
-        file_dir="../../home/ubuntu/data/pile/tokenized",
+        file_dir="../data/pile/tokenized",
     ):
         self.one = torch.load(file_dir + "/val_2_16384.pt")
 
