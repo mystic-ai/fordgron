@@ -132,4 +132,10 @@ dmypy.json
 *jsonl.zst
 *pt
 generate.ipynb
-wandb/
+wandb
+poetry.lock
+
+*.bin
+*.idx
+*.jsonl
+*.jsonl.zst

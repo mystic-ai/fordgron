@@ -9,7 +9,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.8"
-torch = "^1.10.1"
+torch = "^1.10.2"
 black = "^21.12b0"
 transformers = "^4.15.0"
 torchtext = "^0.11.1"
@@ -18,9 +18,15 @@ numpy = "^1.22.0"
 tqdm = "^4.62.3"
 ftfy = "^6.0.3"
 lm-dataformat = "^0.0.20"
+wandb = "^0.12.10"
+pybind11 = "^2.9.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
+poethepoet = "^0.12.3"
+
+[tool.poe.tasks]
+force-cuda11 = "python -m pip install torch==1.10.2+cu113 torchvision==0.11.3+cu113 -f https://download.pytorch.org/whl/torch_stable.html"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
