@@ -1,6 +1,7 @@
 from torch import nn
 import torch.nn.functional as F
 from .self_attention import SelfAttention
+from .feed_forward import FeedForward
 
 class TransformerBlock(nn.Module):
     """
@@ -19,17 +20,14 @@ class TransformerBlock(nn.Module):
         dropout,
         forward_expansion,
         positional_encoding_implementation,
-        rotary_pct
+        rotary_pct,
+        layernorm_epsilon
     ):
         super().__init__()
         self.attention = SelfAttention(embedding_dim, num_attention_heads, positional_encoding_implementation=positional_encoding_implementation, rotary_pct=rotary_pct)
-        self.norm1 = nn.LayerNorm(embedding_dim)
-        self.ff = nn.Sequential(
-            nn.Linear(embedding_dim, forward_expansion * embedding_dim),
-            nn.ReLU(),
-            nn.Linear(forward_expansion * embedding_dim, embedding_dim),
-        )
-        self.norm2 = nn.LayerNorm(embedding_dim)
+        self.norm1 = nn.LayerNorm(embedding_dim, eps=layernorm_epsilon)
+        self.feedforward = FeedForward(embedding_dim)
+        self.norm2 = nn.LayerNorm(embedding_dim, eps=layernorm_epsilon)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, X):

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import math
-from rotary_embedding import RotaryEmbedding
+from .rotary_embedding import RotaryEmbedding
 
 class SelfAttention(nn.Module):
     """
@@ -28,6 +28,7 @@ class SelfAttention(nn.Module):
         self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
         if (positional_encoding_implementation == "rotary_embedding"):
             self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta")
+        self.dense = nn.Linear(self.embedding_dim, self.embedding_dim)
 
     def forward(self, X, mask=True):
         """
@@ -117,7 +118,15 @@ class SelfAttention(nn.Module):
 
         context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1))
 
-        return attendedX
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+
+        new_context_layer_shape = context_layer.size()[:2] + (self.embedding_dim)
+
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        output, bias = self.dense(context_layer)
+
+        return output, bias
     
     def _split_data_across_heads(self, A, num_attention_heads, query_len):
         """

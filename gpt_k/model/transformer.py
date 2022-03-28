@@ -44,7 +44,8 @@ class Transformer(nn.Module):
                 dropout,
                 forward_expansion,
                 positional_encoding_implementation,
-                rotary_pct
+                rotary_pct,
+                layernorm_epsilon
             )
             for _ in range(depth)
         ]
