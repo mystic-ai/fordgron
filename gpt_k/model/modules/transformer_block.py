@@ -14,13 +14,15 @@ class TransformerBlock(nn.Module):
     def __init__(
         self,
         embedding_dim,
-        num_heads,
+        num_attention_heads,
         mask,
         dropout,
         forward_expansion,
+        positional_encoding_implementation,
+        rotary_pct
     ):
         super().__init__()
-        self.attention = SelfAttention(embedding_dim, num_heads, mask)
+        self.attention = SelfAttention(embedding_dim, num_attention_heads, positional_encoding_implementation=positional_encoding_implementation, rotary_pct=rotary_pct)
         self.norm1 = nn.LayerNorm(embedding_dim)
         self.ff = nn.Sequential(
             nn.Linear(embedding_dim, forward_expansion * embedding_dim),

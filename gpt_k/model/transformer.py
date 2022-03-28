@@ -20,13 +20,16 @@ class Transformer(nn.Module):
     def __init__(
         self,
         embedding_dim,
-        num_heads,
+        num_attention_heads,
         mask,
         dropout,
         forward_expansion,
         depth,
         seq_len,
         vocab_len,
+        positional_encoding_implementation = "positional_encoding",
+        rotary_pct = 0,
+        layernorm_epsilon = 1e-5
     ):
         super().__init__()
         self.vocab_len = vocab_len
@@ -36,10 +39,12 @@ class Transformer(nn.Module):
         modules = [
             TransformerBlock(
                 embedding_dim,
-                num_heads,
+                num_attention_heads,
                 mask,
                 dropout,
                 forward_expansion,
+                positional_encoding_implementation,
+                rotary_pct
             )
             for _ in range(depth)
         ]
