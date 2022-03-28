@@ -29,7 +29,7 @@ class SelfAttention(nn.Module):
         if (positional_encoding_implementation == "rotary_embedding"):
             self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta")
 
-    def forward(self, X):
+    def forward(self, X, mask=True):
         """
         Args:
             X: torch.tensor [batch_len, seq_len, input_embedding_dim]
@@ -49,7 +49,7 @@ class SelfAttention(nn.Module):
 
         # 'split' queries keys and values across heads by reshaping so that num_attention_heads is a thing
         # we're reshaping by using the embedding_dim_per_attention_head
-        # typically [batch_len, seq_len, (3 * embedding_dim)] -> [batch_len, seq_len, num_attention_heads, (3 * embedding_dim)]
+        # typically [batch_len, seq_len, (3 * embedding_dim)] -> [batch_len, seq_len, num_attention_heads, (3 * embedding_dim_per_attention_head)]
         queries_keys_values_across_heads = qkv.view(
             qkv.size()[:-1] + (
                 self.num_attention_heads, 3 * self.embedding_dim_per_attention_head
@@ -62,30 +62,61 @@ class SelfAttention(nn.Module):
         values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # third and last chunk (of most nested tensor bit)
 
         if (self.positional_encoding_implementation == "rotary_embedding"):
-            
+            queries_layer, keys_layer = self.rotary_embedding(queries, keys, seq_len=query_seq_len)
 
-        
-        # attention operation: what is the 'relevance' between queries and keys?
-        dot = torch.bmm(queries, keys.transpose(1, 2)) # transpose on keys is likely necessary
-        assert dot.size() == (batch_len * self.num_attention_heads, seq_len, seq_len)
-        
+        # cache qkv values, add logic for this later
+
+        # now compute attention!
+
+        # queries_layer is in this shape [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+        # we need to prepare for the dot product (batched matrix multiplication I guess)
+        # TODO figure out tensor sizes here
+        queries_layer = queries_layer.view(queries_layer.size(0), queries_layer.size(1) * queries_layer.size(2), -1)
+        keys_layer = keys_layer.view(keys_layer.size(0), queries_layer.size(1) * queries_layer.size(2), -1)
+
+        # preallocate attention score result tensor
+        attention_scores = torch.empty(
+            queries_layer.size(1) * queries_layer.size(2),
+            queries_layer.size(0),
+            keys_layer.size(0),
+            dtype=queries_layer.dtype,
+            device=queries_layer.device 
+        )
+
+        # compute raw attention scores
+        attention_scores = torch.baddbmm(
+            attention_scores,
+            queries_layer.transpose(0, 1),
+            keys_layer.transpose(0, 1).transpose(1, 2),
+            beta=0.0,
+            alpha=(1.0 / self.norm_factor)
+        )
+
+        # TODO figure out tensor size
+        attention_scores = attention_scores.view(queries_layer.size(1), queries_layer.size(2), queries_layer.size(0), keys_layer.size(0))
+
+        # TODO get cached attention mask
+
         if self.mask:
-            height, width = dot.size(-2), dot.size(-1)
-            indices = torch.triu_indices(height, width)
-            dot[..., indices[0], indices[1]] = float("-1e20")
+            attention_scores = attention_scores.masked_fill_(mask, -10000.0)
            
-        dot = F.softmax(dot, dim=2)
-        out = torch.bmm(dot, values).view(
-            batch_len, self.num_attention_heads, seq_len, query_len
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # attention dropout implementation should go here
+
+        context_layer_shape = (
+            values_layer.size(1),
+            values_layer.size(2),
+            queries_layer.size(0),
+            values_layer.size(3)
         )
-        out = (
-            out.transpose(1, 2)
-            .contiguous()
-            .view(batch_len, seq_len, query_len * self.num_attention_heads)
-        )
-        
-        attendedX = self.unify_heads(out)
-    
+
+        values_layer = values_layer.view(values_layer.size(0), context_layer_shape[0] * context_layer_shape[1], -1)
+
+        attention_probs = attention_probs.view(context_layer_shape[0] * context_layer_shape[1], context_layer_shape[2], -1)
+
+        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1))
+
         return attendedX
     
     def _split_data_across_heads(self, A, num_attention_heads, query_len):

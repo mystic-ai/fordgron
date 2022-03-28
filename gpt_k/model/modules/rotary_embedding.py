@@ -22,7 +22,7 @@ class RotaryEmbedding(nn.Module):
         self.sin_cached = None
         self.num_rotary_dims = num_rotary_dims
 
-    def rotate_half(x):
+    def _rotate_half(x):
       x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
       return torch.cat(
           (-x2, x1), dim=x1.ndim - 1
@@ -58,8 +58,8 @@ class RotaryEmbedding(nn.Module):
             # not sure what's going on in the above
         cos = self.cos_cached[offset:seq_len + offset, ...]
         sin = self.sin_cached[offset:seq_len + offset, ...]
-        rotated_queries = (queries * cos) + (rotate_half(queries) * sin)
-        rotated_keys = (keys * cos) + (rotate_half(keys) * sin)
+        rotated_queries = (queries * cos) + (_rotate_half(queries) * sin)
+        rotated_keys = (keys * cos) + (_rotate_half(keys) * sin)
         if exists(self.num_rotary_dims):
             rotated_queries = torch.cat((rotated_queries, queries_skipped), dim=-1)
             rotated_keys = torch.cat((rotated_keys, keys_skipped), dim=-1)
