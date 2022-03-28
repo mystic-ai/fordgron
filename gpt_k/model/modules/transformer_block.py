@@ -29,6 +29,7 @@ class TransformerBlock(nn.Module):
         self.feedforward = FeedForward(embedding_dim)
         self.norm2 = nn.LayerNorm(embedding_dim, eps=layernorm_epsilon)
         self.dropout = nn.Dropout(dropout)
+        self.mask = mask
 
     def forward(self, X):
         """
@@ -37,10 +38,12 @@ class TransformerBlock(nn.Module):
         Args:
             X: torch.tensor [batch_size, seq_len, embedding_dim]
         """
-        attended = self.attention(X)
-        X = self.norm1(attended + X)
-        X = self.dropout(X)
-        fedforward = self.ff(X)
-        X = self.norm2(fedforward + X)
-        X = self.dropout(X)
-        return X
+        residual = X
+        norm1X = self.norm1(X)
+        attendedX, attendedX_bias, _ = self.attention(norm1X, self.mask)
+        attention_output = attendedX + attendedX_bias.expand_as(attendedX)
+        norm2X = self.norm2(X)
+        fedforwardX, fedforwardX_bias = self.feedforward(norm2X)
+        fedforward_output = fedforwardX + fedforwardX_bias.expand_as(fedforwardX)
+        output = residual + fedforward_output
+        return output

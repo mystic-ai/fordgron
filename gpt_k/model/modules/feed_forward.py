@@ -5,7 +5,7 @@ class FeedForward(nn.Module):
     def __init__(self, embedding_dim, device=None):
         super().__init__()
         self.embedding_dim = embedding_dim
-        ff_dim = self.embedding_dim
+        ff_dim = 4 * self.embedding_dim
         self.dense_h_to_4h = nn.Linear(
             self.embedding_dim,
             ff_dim,

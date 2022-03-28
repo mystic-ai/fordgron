@@ -24,10 +24,9 @@ class SelfAttention(nn.Module):
         self.positional_encoding_implementation = positional_encoding_implementation
         self.embedding_dim_per_attention_head = self.embedding_dim // self.num_attention_heads
         self.num_rotary_dims = int(self.embedding_dim_per_attention_head * rotary_pct)
-        self.to_queries_keys_values = nn.Linear(self.embedding_dim, 3 * self.embedding_dim, bias=False)
+        self.to_queries_keys_values = nn.Linear(self.embedding_dim, 3 * self.embedding_dim)
         self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
-        if (positional_encoding_implementation == "rotary_embedding"):
-            self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta")
+        self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta") # figure out a way to make this conditional
         self.dense = nn.Linear(self.embedding_dim, self.embedding_dim)
 
     def forward(self, X, mask=True):
