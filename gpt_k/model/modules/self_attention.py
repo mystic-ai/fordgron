@@ -4,11 +4,22 @@ import torch.nn.functional as F
 import math
 from .rotary_embedding import RotaryEmbedding
 
+class LinearSkipAddBias(nn.Module):
+    def __init__(self, in_features: int, out_features: int, device=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device))
+        self.bias = nn.Parameter(torch.empty(out_features, device=device))
+
+    def forward(self, x):
+        return F.linear(x, self.weight), self.bias
+
 class SelfAttention(nn.Module):
     """
     Multi-head (if num_attention_heads > 1), scaled dot-product self-attention.
     """
-    def __init__(self, embedding_dim, num_attention_heads, positional_encoding_implementation=None, rotary_pct=None):
+    def __init__(self, embedding_dim, num_attention_heads, positional_encoding_implementation=None, rotary_pct=None, device=None):
         """
         Args:
             embedding_dim: int - length of the embedding vector
@@ -27,12 +38,12 @@ class SelfAttention(nn.Module):
         self.to_queries_keys_values = nn.Linear(self.embedding_dim, 3 * self.embedding_dim)
         self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
         self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta") # figure out a way to make this conditional
-        self.dense = nn.Linear(self.embedding_dim, self.embedding_dim)
+        self.dense = LinearSkipAddBias(self.embedding_dim, self.embedding_dim, device=device)
 
     def forward(self, X, mask=True):
         """
         Args:
-            X: torch.tensor [batch_len, seq_len, input_embedding_dim]
+            X: torch.tensor [batch_len, seq_len, embedding_dim]
         Returns:
             attendedX: torch.tensor [batch_len, seq_len, embedding_dim]
         """
@@ -42,105 +53,78 @@ class SelfAttention(nn.Module):
         ), f"Input embedding dim ({input_embedding_dim}) must match layer embedding dim ({self.embedding_dim})"
 
         # queries, keys, and values introduce a learnable matrix on all the embedding vectors of the sequence
-        # typically [batch_len, seq_len, embedding_dim] -> [batch_len, seq_len, (3 * embedding_dim)]
-        queries_keys_values = self.to_queries_keys_values(X)
+        queries_keys_values = self.to_queries_keys_values(X) # [batch_len, seq_len, (3 * embedding_dim)]
         
-        query_seq_len = self.embedding_dim // self.num_attention_heads
+        queries_keys_values_across_heads = queries_keys_values.view(
+            batch_len, seq_len, self.num_attention_heads, 3 * self.embedding_dim_per_attention_head
+        ) # [batch_len, seq_len, num_attention_heads, (3 * embedding_dim_per_attention_head)]
 
-        # 'split' queries keys and values across heads by reshaping so that num_attention_heads is a thing
-        # we're reshaping by using the embedding_dim_per_attention_head
-        # typically [batch_len, seq_len, (3 * embedding_dim)] -> [batch_len, seq_len, num_attention_heads, (3 * embedding_dim_per_attention_head)]
-        queries_keys_values_across_heads = qkv.view(
-            qkv.size()[:-1] + (
-                self.num_attention_heads, 3 * self.embedding_dim_per_attention_head
-            )
-        )
-
-        # get the three 'elements' of qkv
-        queries_layer = queries_keys_values_across_heads[..., :self.embedding_dim_per_attention_head] # first chunk (of most nested tensor bit)
-        keys_layer = queries_keys_values_across_heads[..., self:embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head] # second and middle chunk (of most nested tensor bit)
-        values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # third and last chunk (of most nested tensor bit)
+        queries_layer = queries_keys_values_across_heads[..., :self.embedding_dim_per_attention_head] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] first chunk
+        keys_layer = queries_keys_values_across_heads[..., self.embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] second and middle chunk
+        values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] third and last chunk
 
         if (self.positional_encoding_implementation == "rotary_embedding"):
-            queries_layer, keys_layer = self.rotary_embedding(queries, keys, seq_len=query_seq_len)
+            queries_layer, keys_layer = self.rotary_embedding(queries, keys, seq_len=query_seq_len) # both [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
 
         # cache qkv values, add logic for this later
 
         # now compute attention!
 
-        # queries_layer is in this shape [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
         # we need to prepare for the dot product (batched matrix multiplication I guess)
         # TODO figure out tensor sizes here
-        queries_layer = queries_layer.view(queries_layer.size(0), queries_layer.size(1) * queries_layer.size(2), -1)
-        keys_layer = keys_layer.view(keys_layer.size(0), queries_layer.size(1) * queries_layer.size(2), -1)
+        queries_layer = queries_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        keys_layer = keys_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
 
         # preallocate attention score result tensor
         attention_scores = torch.empty(
-            queries_layer.size(1) * queries_layer.size(2),
-            queries_layer.size(0),
-            keys_layer.size(0),
-            dtype=queries_layer.dtype,
-            device=queries_layer.device 
+            seq_len * self.num_attention_heads,
+            batch_len,
+            batch_len,
+            device=queries_layer.device,
+            dtype=queries_layer.dtype
         )
 
         # compute raw attention scores
         attention_scores = torch.baddbmm(
             attention_scores,
-            queries_layer.transpose(0, 1),
-            keys_layer.transpose(0, 1).transpose(1, 2),
+            queries_layer.transpose(0, 1), # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+            keys_layer.transpose(0, 1).transpose(1, 2), # [(seq_len * num_attention_heads), embedding_dim_per_attention_head, batch_len]
             beta=0.0,
             alpha=(1.0 / self.norm_factor)
-        )
+        ) # [(seq_len * num_attention_heads), batch_len, batch_len]
 
-        # TODO figure out tensor size
-        attention_scores = attention_scores.view(queries_layer.size(1), queries_layer.size(2), queries_layer.size(0), keys_layer.size(0))
+        attention_scores = attention_scores.view(seq_len, self.num_attention_heads, batch_len, batch_len) # [seq_len, num_attention_heads, batch_len, batch_len]
 
         # TODO get cached attention mask
 
-        if self.mask:
-            attention_scores = attention_scores.masked_fill_(mask, -10000.0)
-           
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+        ltor_mask = torch.tril(
+            torch.ones(
+                (seq_len, batch_len, batch_len), device=attention_scores.device
+            ).view(seq_len, 1, batch_len, batch_len).bool()
+         ) # [seq_len, 1, batch_len, batch_len]
+
+        if mask:
+            attention_scores = attention_scores.masked_fill_(ltor_mask, -10000.0) # [seq_len, num_attention_heads, batch_len, batch_len]
+            
+        # should scale attention probs as well
+
+        attention_probs = nn.Softmax(dim=-1)(attention_scores) # [seq_len, num_attention_heads, batch_len, batch_len]
 
         # attention dropout implementation should go here
 
-        context_layer_shape = (
-            values_layer.size(1),
-            values_layer.size(2),
-            queries_layer.size(0),
-            values_layer.size(3)
-        )
+        values_layer = values_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
 
-        values_layer = values_layer.view(values_layer.size(0), context_layer_shape[0] * context_layer_shape[1], -1)
+        attention_probs = attention_probs.view(seq_len * self.num_attention_heads, batch_len, -1) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
 
-        attention_probs = attention_probs.view(context_layer_shape[0] * context_layer_shape[1], context_layer_shape[2], -1)
+        # here's the magic computation
+        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1)) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
 
-        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1))
+        context_layer = context_layer.view(seq_len, self.num_attention_heads, batch_len, self.embedding_dim_per_attention_head) # [seq_len, num_attention_heads, batch_len, embedding_dim_per_attention_head]
 
-        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous() # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
 
-        new_context_layer_shape = context_layer.size()[:2] + (self.embedding_dim)
-
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.view(batch_len, seq_len, self.embedding_dim) # [batch_len, seq_len, embedding_dim]
 
         output, bias = self.dense(context_layer)
 
         return output, bias
-    
-    def _split_data_across_heads(self, A, num_attention_heads, query_len):
-        """
-        Divide the batched data across num_attention_heads. The split occurs 'in theory' by reshaping the matrix, rather than slicing it.
-        
-        Args:
-            A: torch.tensor - [batch_len, seq_len, embedding_dim]
-            num_attention_heads = int - number of attention heads
-            query_len = int - chunk of embedding vector per head
-        Returns:
-            A: torch.tensor - [batch_len * num_attention_heads, seq_len, query_len]
-        """
-        batch_len, seq_len, embedding_dim = A.size()
-        # embedding vectors inside the queries, keys, and values are divided into heads and sublayers of query_len length
-        A = A.view(batch_len, seq_len, num_attention_heads, query_len)
-        A = A.transpose(1, 2).contiguous() # swap seq_len and num_attention_heads dimensions, to enable next operation
-        A = A.view(batch_len * num_attention_heads, seq_len, query_len)
-        return A

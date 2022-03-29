@@ -1,17 +1,29 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+class LinearSkipAddBias(nn.Module):
+    def __init__(self, in_features: int, out_features: int, device=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device))
+        self.bias = nn.Parameter(torch.empty(out_features, device=device))
+
+    def forward(self, x):
+        return F.linear(x, self.weight), self.bias
 
 class FeedForward(nn.Module):
     def __init__(self, embedding_dim, device=None):
         super().__init__()
         self.embedding_dim = embedding_dim
         ff_dim = 4 * self.embedding_dim
-        self.dense_h_to_4h = nn.Linear(
+        self.dense_h_to_4h = LinearSkipAddBias(
             self.embedding_dim,
             ff_dim,
             device=device,
         )
-        self.dense_4h_to_h = nn.Linear(
+        self.dense_4h_to_h = LinearSkipAddBias(
             ff_dim,
             self.embedding_dim,
             device=device,
@@ -21,10 +33,26 @@ class FeedForward(nn.Module):
         intermediate_parallel, bias_parallel = self.dense_h_to_4h(X)
         intermediate_parallel = bias_gelu_impl(
             intermediate_parallel,
-            bias_parallel,
+            bias_parallel
         )
         output, output_bias = self.dense_4h_to_h(intermediate_parallel)
         return output, output_bias
+
+# noinspection PyAbstractClass
+class GeLUFunction(torch.autograd.Function):
+    # noinspection PyMethodOverriding
+    @staticmethod
+    # bias is an optional argument
+    def forward(ctx, inputs, bias):
+        ctx.save_for_backward(inputs, bias)
+        return bias_gelu(bias, inputs)
+
+    # noinspection PyMethodOverriding
+    @staticmethod
+    def backward(ctx, grad_output):
+        inputs, bias = ctx.saved_tensors
+        tmp = bias_gelu_back(grad_output, bias, inputs)
+        return tmp, tmp
 
 # @torch.jit.script
 def bias_gelu(bias, y):
@@ -44,21 +72,5 @@ def bias_gelu_back(g, bias, y):
             (1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)
     ) + 0.5 * (1 + tanh_out)
     return ff * g
-
-class GeLUFunction(torch.autograd.Function):
-    # noinspection PyMethodOverriding
-    @staticmethod
-    # bias is an optional argument
-    def forward(ctx, inputs, bias):
-        ctx.save_for_backward(inputs, bias)
-        return bias_gelu(bias, inputs)
-
-    # noinspection PyMethodOverriding
-    @staticmethod
-    def backward(ctx, grad_output):
-        inputs, bias = ctx.saved_tensors
-        tmp = bias_gelu_back(grad_output, bias, inputs)
-        return tmp, tmp
-
 
 bias_gelu_impl = GeLUFunction.apply

@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 import torch.nn.functional as F
 from .self_attention import SelfAttention
@@ -21,11 +22,12 @@ class TransformerBlock(nn.Module):
         forward_expansion,
         positional_encoding_implementation,
         rotary_pct,
-        layernorm_epsilon
+        layernorm_epsilon,
+        device=None
     ):
         super().__init__()
-        self.attention = SelfAttention(embedding_dim, num_attention_heads, positional_encoding_implementation=positional_encoding_implementation, rotary_pct=rotary_pct)
         self.norm1 = nn.LayerNorm(embedding_dim, eps=layernorm_epsilon)
+        self.attention = SelfAttention(embedding_dim, num_attention_heads, positional_encoding_implementation=positional_encoding_implementation, rotary_pct=rotary_pct, device=device)
         self.feedforward = FeedForward(embedding_dim)
         self.norm2 = nn.LayerNorm(embedding_dim, eps=layernorm_epsilon)
         self.dropout = nn.Dropout(dropout)
@@ -36,14 +38,11 @@ class TransformerBlock(nn.Module):
         The size of X remains the same as it passes through the transformer block. 
         
         Args:
-            X: torch.tensor [batch_size, seq_len, embedding_dim]
+            X: torch.tensor [batch_len, seq_len, embedding_dim]
         """
         residual = X
-        norm1X = self.norm1(X)
-        attendedX, attendedX_bias, _ = self.attention(norm1X, self.mask)
-        attention_output = attendedX + attendedX_bias.expand_as(attendedX)
-        norm2X = self.norm2(X)
-        fedforwardX, fedforwardX_bias = self.feedforward(norm2X)
-        fedforward_output = fedforwardX + fedforwardX_bias.expand_as(fedforwardX)
-        output = residual + fedforward_output
-        return output
+        norm1X = self.norm1(X) # [batch_len, seq_len, embedding_dim]
+        attendedX_output, attendedX_bias = self.attention(norm1X, self.mask)
+        norm2X = self.norm2(attendedX_output)
+        fedforwardX_output, fedforwardX_bias = self.feedforward(norm2X)
+        return fedforwardX_output
