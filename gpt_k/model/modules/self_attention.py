@@ -39,47 +39,73 @@ class SelfAttention(nn.Module):
         self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
         self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta") # figure out a way to make this conditional
         self.dense = LinearSkipAddBias(self.embedding_dim, self.embedding_dim, device=device)
+        self.use_cache = True
 
-    def forward(self, X, mask=True):
+    def forward(self, X, mask=None, previous_layer=None):
         """
         Args:
-            X: torch.tensor [batch_len, seq_len, embedding_dim]
+            X: torch.tensor [batch_len, input_seq_len, embedding_dim]
         Returns:
-            attendedX: torch.tensor [batch_len, seq_len, embedding_dim]
+            attendedX: torch.tensor [batch_len, input_seq_len, embedding_dim]
         """
-        batch_len, seq_len, input_embedding_dim = X.size()
-        assert (
-            input_embedding_dim == self.embedding_dim
-        ), f"Input embedding dim ({input_embedding_dim}) must match layer embedding dim ({self.embedding_dim})"
+        # previous_layer is [2, input_seq_len_so_far, batch_len, num_attention_heads, embedding_dim_per_attention_head] the 2 is keys and values
 
         # queries, keys, and values introduce a learnable matrix on all the embedding vectors of the sequence
-        queries_keys_values = self.to_queries_keys_values(X) # [batch_len, seq_len, (3 * embedding_dim)]
-        
-        queries_keys_values_across_heads = queries_keys_values.view(
-            batch_len, seq_len, self.num_attention_heads, 3 * self.embedding_dim_per_attention_head
-        ) # [batch_len, seq_len, num_attention_heads, (3 * embedding_dim_per_attention_head)]
+        queries_keys_values = self.to_queries_keys_values(X) # [batch_len, input_seq_len, (3 * embedding_dim)]
 
-        queries_layer = queries_keys_values_across_heads[..., :self.embedding_dim_per_attention_head] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] first chunk
-        keys_layer = queries_keys_values_across_heads[..., self.embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] second and middle chunk
-        values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head] third and last chunk
+        new_tensor_shape = queries_keys_values.size()[:-1] + (
+            self.num_attention_heads,
+            3 * self.embedding_dim_per_attention_head,
+        )
+        queries_keys_values_across_heads = queries_keys_values.view(*new_tensor_shape)
+
+        queries_layer = queries_keys_values_across_heads[..., :self.embedding_dim_per_attention_head] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] first chunk
+        keys_layer = queries_keys_values_across_heads[..., self.embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] second and middle chunk
+        values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] third and last chunk
 
         if (self.positional_encoding_implementation == "rotary_embedding"):
-            queries_layer, keys_layer = self.rotary_embedding(queries, keys, seq_len=query_seq_len) # both [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+            queries_layer, keys_layer = self.rotary_embedding(queries_layer, keys_layer, values_layer, previous_layer=previous_layer) # both [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
 
-        # cache qkv values, add logic for this later
+        if previous_layer is not None and previous_layer.numel() > 0:
+            past_key, past_value = previous_layer # extracting keys and values from one larger tensor, both are [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+            print("keys layer before stacking")
+            print(keys_layer.size())
+            keys_layer = torch.cat((past_key.type_as(keys_layer), keys_layer), dim=0) # they are stacked, so now [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+            print("keys layer after stacking")
+            print(keys_layer.size())
+            # I think the dimension on the cating depends on swapping of seq len and batch len
+            values_layer = torch.cat((past_value.type_as(values_layer), values_layer), dim=0) # they are stacked, so now [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+
+        # caching keys and values before computing attention
+
+        if self.use_cache:
+            kv_cache = torch.stack((keys_layer, values_layer)) # [2, batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
+        else:
+            print("use_cache is false")
+            kv_cache = None
 
         # now compute attention!
 
+        output_size = (
+            queries_layer.size(1),
+            queries_layer.size(2),
+            queries_layer.size(0),
+            keys_layer.size(0)
+        )
+
         # we need to prepare for the dot product (batched matrix multiplication I guess)
-        # TODO figure out tensor sizes here
-        queries_layer = queries_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
-        keys_layer = keys_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        queries_layer = queries_layer.view(output_size[2], output_size[0] * output_size[1], -1) # [batch_len, (input_seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        print("queries layer size")
+        print(queries_layer.size())
+        keys_layer = keys_layer.view(output_size[3], output_size[0] * output_size[1], -1) # [batch_len, (input_seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        print("keys layer size")
+        print(queries_layer.size())
 
         # preallocate attention score result tensor
         attention_scores = torch.empty(
-            seq_len * self.num_attention_heads,
-            batch_len,
-            batch_len,
+            output_size[0] * output_size[1],
+            output_size[2],
+            output_size[3],
             device=queries_layer.device,
             dtype=queries_layer.dtype
         )
@@ -87,44 +113,64 @@ class SelfAttention(nn.Module):
         # compute raw attention scores
         attention_scores = torch.baddbmm(
             attention_scores,
-            queries_layer.transpose(0, 1), # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
-            keys_layer.transpose(0, 1).transpose(1, 2), # [(seq_len * num_attention_heads), embedding_dim_per_attention_head, batch_len]
+            queries_layer.transpose(0, 1), # [(input_seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+            keys_layer.transpose(0, 1).transpose(1, 2), # [(input_seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
             beta=0.0,
             alpha=(1.0 / self.norm_factor)
-        ) # [(seq_len * num_attention_heads), batch_len, batch_len]
+        ) # [input_seq_len * num_attention_heads, batch_len, batch_len]
 
-        attention_scores = attention_scores.view(seq_len, self.num_attention_heads, batch_len, batch_len) # [seq_len, num_attention_heads, batch_len, batch_len]
+        print("attention scores")
+        print(attention_scores.size())
 
-        # TODO get cached attention mask
+        # first time [128, 12, 12]
+        # second time [128, 1, 13] OKAY HERE'S THE PROBLEM, seq_len is not the updated seq_len at some point
 
-        ltor_mask = torch.tril(
-            torch.ones(
-                (seq_len, batch_len, batch_len), device=attention_scores.device
-            ).view(seq_len, 1, batch_len, batch_len).bool()
-         ) # [seq_len, 1, batch_len, batch_len]
+        attention_scores = attention_scores.view(*output_size) # [input_seq_len, num_attention_heads, input_seq_len, batch_len]
 
-        if mask:
-            attention_scores = attention_scores.masked_fill_(ltor_mask, -10000.0) # [seq_len, num_attention_heads, batch_len, batch_len]
+        print("viewed attention scores")
+        print(attention_scores.size())
+        
+        
+        # first time [2, 64, 12, 12]
+        # second time [2, 64, 1, 13] WHY IS THIS 1 AND NOT 13
+
+        if self.use_cache:
+            mask = mask[..., :attention_scores.size(3), :attention_scores.size(3)]
+
+        masked_scores = attention_scores.masked_fill_(mask, -10000.0) # [seq_len, num_attention_heads, batch_len, batch_len]
             
         # should scale attention probs as well
 
-        attention_probs = nn.Softmax(dim=-1)(attention_scores) # [seq_len, num_attention_heads, batch_len, batch_len]
+        attention_probs = nn.Softmax(dim=-1)(masked_scores) # [seq_len, num_attention_heads, batch_len, batch_len]
 
         # attention dropout implementation should go here
 
-        values_layer = values_layer.view(batch_len, seq_len * self.num_attention_heads, -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        output_size = (
+            values_layer.size(1),
+            values_layer.size(2),
+            queries_layer.size(0),
+            values_layer.size(3),
+        ) # [seq_len, num_attention_heads, batch_len, embedding_dim_per_attention_head]
 
-        attention_probs = attention_probs.view(seq_len * self.num_attention_heads, batch_len, -1) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+        values_layer = values_layer.view(values_layer.size(0), output_size[0] * output_size[1], -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
+
+        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
 
         # here's the magic computation
-        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1)) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1))
 
-        context_layer = context_layer.view(seq_len, self.num_attention_heads, batch_len, self.embedding_dim_per_attention_head) # [seq_len, num_attention_heads, batch_len, embedding_dim_per_attention_head]
+        context_layer = context_layer.view(*output_size)
 
-        context_layer = context_layer.permute(2, 0, 1, 3).contiguous() # [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous() # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
 
-        context_layer = context_layer.view(batch_len, seq_len, self.embedding_dim) # [batch_len, seq_len, embedding_dim]
+        new_context_layer_shape = context_layer.size()[:-2] + (
+            self.embedding_dim,
+        ) # [batch_len, input_seq_len, embedding_dim]
+        context_layer = context_layer.view(*new_context_layer_shape)
 
         output, bias = self.dense(context_layer)
+
+        if self.use_cache:
+            output = [output, kv_cache]
 
         return output, bias
