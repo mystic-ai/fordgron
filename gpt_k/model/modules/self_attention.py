@@ -1,176 +1,196 @@
 import torch
-from torch import nn
-import torch.nn.functional as F
+import torch.nn as nn
+from .rotary_embedding import RotaryEmbedding, apply_rotary_pos_emb
 import math
-from .rotary_embedding import RotaryEmbedding
-
-class LinearSkipAddBias(nn.Module):
-    def __init__(self, in_features: int, out_features: int, device=None):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty((out_features, in_features), device=device))
-        self.bias = nn.Parameter(torch.empty(out_features, device=device))
-
-    def forward(self, x):
-        return F.linear(x, self.weight), self.bias
 
 class SelfAttention(nn.Module):
-    """
-    Multi-head (if num_attention_heads > 1), scaled dot-product self-attention.
-    """
-    def __init__(self, embedding_dim, num_attention_heads, positional_encoding_implementation=None, rotary_pct=None, device=None):
-        """
-        Args:
-            embedding_dim: int - length of the embedding vector
-            num_attention_heads: int - number of attention heads
-            mask: bool - whether to mask input triangularly
-        """
+    def __init__(self, args, use_cache=False, device=None):
         super().__init__()
-        assert (
-            embedding_dim % num_attention_heads == 0
-        ), f"Embedding dimension ({embedding_dim}) must be divisible by number of heads ({num_attention_heads})"
-        self.embedding_dim = embedding_dim
-        self.num_attention_heads = num_attention_heads
-        self.positional_encoding_implementation = positional_encoding_implementation
-        self.embedding_dim_per_attention_head = self.embedding_dim // self.num_attention_heads
-        self.num_rotary_dims = int(self.embedding_dim_per_attention_head * rotary_pct)
-        self.to_queries_keys_values = nn.Linear(self.embedding_dim, 3 * self.embedding_dim)
-        self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
-        self.rotary_embedding = RotaryEmbedding(num_rotary_dims=self.num_rotary_dims, device="meta") # figure out a way to make this conditional
-        self.dense = LinearSkipAddBias(self.embedding_dim, self.embedding_dim, device=device)
-        self.use_cache = True
-
-    def forward(self, X, mask=None, previous_layer=None):
-        """
-        Args:
-            X: torch.tensor [batch_len, input_seq_len, embedding_dim]
-        Returns:
-            attendedX: torch.tensor [batch_len, input_seq_len, embedding_dim]
-        """
-        # previous_layer is [2, input_seq_len_so_far, batch_len, num_attention_heads, embedding_dim_per_attention_head] the 2 is keys and values
-
-        # queries, keys, and values introduce a learnable matrix on all the embedding vectors of the sequence
-        queries_keys_values = self.to_queries_keys_values(X) # [batch_len, input_seq_len, (3 * embedding_dim)]
-
-        new_tensor_shape = queries_keys_values.size()[:-1] + (
-            self.num_attention_heads,
-            3 * self.embedding_dim_per_attention_head,
+        self.hidden_size = args.hidden_size
+        self.use_cache = use_cache
+        self.num_attention_heads = args.num_attention_heads
+        self.hidden_size_per_attention_head = args.hidden_size // args.num_attention_heads
+        self.rotary_ndims = int(self.hidden_size_per_attention_head * args.rotary_pct)
+        self.rotary_emb = RotaryEmbedding(
+            self.rotary_ndims,
+            base=args.rotary_emb_base,
+            device=device,
         )
-        queries_keys_values_across_heads = queries_keys_values.view(*new_tensor_shape)
+        self.query_key_value = nn.Linear(
+            args.hidden_size,
+            3 * args.hidden_size,
+            device=device,
+        )
+        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        self.dense = nn.Linear(
+            args.hidden_size,
+            args.hidden_size,
+            device=device,
+        )
 
-        queries_layer = queries_keys_values_across_heads[..., :self.embedding_dim_per_attention_head] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] first chunk
-        keys_layer = queries_keys_values_across_heads[..., self.embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] second and middle chunk
-        values_layer = queries_keys_values_across_heads[..., 2 * self.embedding_dim_per_attention_head:] # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head] third and last chunk
+    def forward(self, hidden_states, attention_mask, layer_past=None):
+        has_layer_past = layer_past is not None and layer_past.numel() > 0
 
-        if (self.positional_encoding_implementation == "rotary_embedding"):
-            queries_layer, keys_layer = self.rotary_embedding(queries_layer, keys_layer, values_layer, previous_layer=previous_layer) # both [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
+        # Compute QKV
+        # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
+        qkv = self.query_key_value(hidden_states)
 
-        if previous_layer is not None and previous_layer.numel() > 0:
-            past_key, past_value = previous_layer # extracting keys and values from one larger tensor, both are [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
-            print("keys layer before stacking")
-            print(keys_layer.size())
-            keys_layer = torch.cat((past_key.type_as(keys_layer), keys_layer), dim=0) # they are stacked, so now [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
-            print("keys layer after stacking")
-            print(keys_layer.size())
-            # I think the dimension on the cating depends on swapping of seq len and batch len
-            values_layer = torch.cat((past_value.type_as(values_layer), values_layer), dim=0) # they are stacked, so now [batch_len, seq_len, num_attention_heads, embedding_dim_per_attention_head]
+        # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
+        new_qkv_shape = qkv.size()[:-1] + (
+            self.num_attention_heads,
+            3 * self.hidden_size_per_attention_head,
+        )
+        qkv = qkv.view(*new_qkv_shape)
 
-        # caching keys and values before computing attention
+        # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
+        query_layer = qkv[..., :self.hidden_size_per_attention_head]
+        key_layer = qkv[..., self.hidden_size_per_attention_head: 2 * self.hidden_size_per_attention_head]
+        value_layer = qkv[..., 2 * self.hidden_size_per_attention_head:]
 
+        # Compute rotary embeddings
+        query_rot, query_pass = (
+            query_layer[..., : self.rotary_ndims],
+            query_layer[..., self.rotary_ndims:],
+        )
+        key_rot, key_pass = (
+            key_layer[..., : self.rotary_ndims],
+            key_layer[..., self.rotary_ndims:],
+        )
+        seq_len = key_layer.shape[0]
+        offset = 0
+        if has_layer_past:
+            offset = layer_past[0].shape[0]
+            seq_len += offset
+        cos, sin = self.rotary_emb(value_layer, seq_len=seq_len)
+        query_layer, key_layer = apply_rotary_pos_emb(
+            query_rot, key_rot, cos, sin, offset=offset,
+        )
+        query_layer = torch.cat((query_layer, query_pass), dim=-1)
+        key_layer = torch.cat((key_layer, key_pass), dim=-1)
+
+        # Cache QKV values
+        if has_layer_past:
+            past_key, past_value = layer_past
+            key_layer = torch.cat((past_key.type_as(key_layer), key_layer), dim=0)
+            value_layer = torch.cat((past_value.type_as(value_layer), value_layer), dim=0)
         if self.use_cache:
-            kv_cache = torch.stack((keys_layer, values_layer)) # [2, batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
+            kv_cache = torch.stack((key_layer, value_layer))
         else:
-            print("use_cache is false")
             kv_cache = None
 
-        # now compute attention!
-
-        output_size = (
-            queries_layer.size(1),
-            queries_layer.size(2),
-            queries_layer.size(0),
-            keys_layer.size(0)
+        # Compute attention
+        # noinspection PyTypeChecker
+        context_layer = self.attention(
+            query_layer, key_layer, value_layer, attention_mask
         )
 
-        # we need to prepare for the dot product (batched matrix multiplication I guess)
-        queries_layer = queries_layer.view(output_size[2], output_size[0] * output_size[1], -1) # [batch_len, (input_seq_len * num_attention_heads), embedding_dim_per_attention_head]
-        print("queries layer size")
-        print(queries_layer.size())
-        keys_layer = keys_layer.view(output_size[3], output_size[0] * output_size[1], -1) # [batch_len, (input_seq_len * num_attention_heads), embedding_dim_per_attention_head]
-        print("keys layer size")
-        print(queries_layer.size())
+        # Reshape outputs
+        # [b, np, sq, hn] --> [sq, b, np, hn]
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
-        # preallocate attention score result tensor
-        attention_scores = torch.empty(
+        # [sq, b, np, hn] --> [sq, b, hp]
+        new_context_layer_shape = context_layer.size()[:-2] + (
+            self.hidden_size,
+        )
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        # =================
+        # Output. [sq, b, h]
+        # =================
+        output = self.dense(context_layer)
+
+        return output, kv_cache
+
+    def attention(self, query_layer, key_layer, value_layer, attention_mask):
+        # ===================================
+        # Raw attention scores. [b, np, s, s]
+        # ===================================
+
+        # [b, np, sq, sk]
+        output_size = (
+            query_layer.size(1),
+            query_layer.size(2),
+            query_layer.size(0),
+            key_layer.size(0),
+        )
+
+        # [sq, b, np, hn] -> [sq, b * np, hn]
+        query_layer = query_layer.view(
+            output_size[2], output_size[0] * output_size[1], -1
+        )
+        key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
+
+        # preallocating result tensor: [b * np, sq, sk]
+        matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            device=queries_layer.device,
-            dtype=queries_layer.dtype
+            dtype=query_layer.dtype,
+            device=query_layer.device,
         )
 
-        # compute raw attention scores
-        attention_scores = torch.baddbmm(
-            attention_scores,
-            queries_layer.transpose(0, 1), # [(input_seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
-            keys_layer.transpose(0, 1).transpose(1, 2), # [(input_seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+        # Raw attention scores. [b * np, sq, sk]
+        matmul_result = torch.baddbmm(
+            matmul_result,
+            query_layer.transpose(0, 1),  # [b * np, sq, hn]
+            key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             beta=0.0,
-            alpha=(1.0 / self.norm_factor)
-        ) # [input_seq_len * num_attention_heads, batch_len, batch_len]
+            alpha=(1.0 / self.norm_factor),
+        )
 
-        print("attention scores")
-        print(attention_scores.size())
+        # change view to [b, np, sq, sk]
+        attention_scores = matmul_result.view(*output_size)
 
-        # first time [128, 12, 12]
-        # second time [128, 1, 13] OKAY HERE'S THE PROBLEM, seq_len is not the updated seq_len at some point
+        # ==================================================
+        # Update attention mask for inference. [b, np, sq, sk]
+        # ==================================================
 
-        attention_scores = attention_scores.view(*output_size) # [input_seq_len, num_attention_heads, input_seq_len, batch_len]
+        # ===========================
+        # Attention probs and dropout
+        # ===========================
 
-        print("viewed attention scores")
-        print(attention_scores.size())
-        
-        
-        # first time [2, 64, 12, 12]
-        # second time [2, 64, 1, 13] WHY IS THIS 1 AND NOT 13
+        # attention scores and attention mask [b, np, sq, sk]
+        masked_scores = attention_mask_func(attention_scores, attention_mask) \
+            if attention_mask is not None else attention_scores
+        attention_probs = torch.nn.Softmax(dim=-1)(masked_scores)
 
-        if self.use_cache:
-            mask = mask[..., :attention_scores.size(3), :attention_scores.size(3)]
+        #         # This is actually dropping out entire tokens to attend to, which might
+        #         # seem a bit unusual, but is taken from the original Transformer paper.
+        #         attention_probs = self.attention_dropout(attention_probs)
 
-        masked_scores = attention_scores.masked_fill_(mask, -10000.0) # [seq_len, num_attention_heads, batch_len, batch_len]
-            
-        # should scale attention probs as well
+        # =========================
+        # Context layer. [sq, b, hp]
+        # =========================
 
-        attention_probs = nn.Softmax(dim=-1)(masked_scores) # [seq_len, num_attention_heads, batch_len, batch_len]
+        # value_layer -> context layer.
+        # [sk, b, np, hn] --> [b, np, sq, hn]
 
-        # attention dropout implementation should go here
-
+        # context layer shape: [b, np, sq, hn]
         output_size = (
-            values_layer.size(1),
-            values_layer.size(2),
-            queries_layer.size(0),
-            values_layer.size(3),
-        ) # [seq_len, num_attention_heads, batch_len, embedding_dim_per_attention_head]
+            value_layer.size(1),
+            value_layer.size(2),
+            query_layer.size(0),
+            value_layer.size(3),
+        )
 
-        values_layer = values_layer.view(values_layer.size(0), output_size[0] * output_size[1], -1) # [batch_len, (seq_len * num_attention_heads), embedding_dim_per_attention_head]
+        # change view [sk, b * np, hn]
+        value_layer = value_layer.view(
+            value_layer.size(0), output_size[0] * output_size[1], -1
+        )
 
-        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1) # [(seq_len * num_attention_heads), batch_len, embedding_dim_per_attention_head]
+        # change view [b * np, sq, sk]
+        attention_probs = attention_probs.view(
+            output_size[0] * output_size[1], output_size[2], -1
+        )
 
-        # here's the magic computation
-        context_layer = torch.bmm(attention_probs, values_layer.transpose(0, 1))
+        # matmul: [b * np, sq, hn]
+        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
+        # change view [b, np, sq, hn]
         context_layer = context_layer.view(*output_size)
+        return context_layer
 
-        context_layer = context_layer.permute(2, 0, 1, 3).contiguous() # [batch_len, input_seq_len, num_attention_heads, embedding_dim_per_attention_head]
-
-        new_context_layer_shape = context_layer.size()[:-2] + (
-            self.embedding_dim,
-        ) # [batch_len, input_seq_len, embedding_dim]
-        context_layer = context_layer.view(*new_context_layer_shape)
-
-        output, bias = self.dense(context_layer)
-
-        if self.use_cache:
-            output = [output, kv_cache]
-
-        return output, bias
+def attention_mask_func(attention_scores, ltor_mask):
+    """Assign -10000.0 to False cells in ltor_mask"""
+    attention_scores.masked_fill_(~ltor_mask, -10000.0)
+    return attention_scores
