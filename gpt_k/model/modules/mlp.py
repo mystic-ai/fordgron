@@ -4,9 +4,9 @@ import torch.nn as nn
 class MLP(nn.Module):
     def __init__(self, args, device=None):
         super().__init__()
-        ff_dim = 4 * args.hidden_size
-        self.dense_h_to_4h = nn.Linear(args.hidden_size, ff_dim, device=device)
-        self.dense_4h_to_h = nn.Linear(ff_dim, args.hidden_size, device=device)
+        ff_dim = 4 * args["embedding_dim"]
+        self.dense_h_to_4h = nn.Linear(args["embedding_dim"], ff_dim, device=device)
+        self.dense_4h_to_h = nn.Linear(ff_dim, args["embedding_dim"], device=device)
 
     def forward(self, hidden_states):
         intermediate_parallel = self.dense_h_to_4h(hidden_states)

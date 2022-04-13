@@ -7,13 +7,13 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.use_cache = use_cache
         self.input_layernorm = nn.LayerNorm(
-            args.hidden_size,
-            eps=args.layernorm_epsilon,
+            args["embedding_dim"],
+            eps=args["layernorm_eps"],
             device=device,
         )
         self.post_attention_layernorm = nn.LayerNorm(
-            args.hidden_size,
-            eps=args.layernorm_epsilon,
+            args["embedding_dim"],
+            eps=args["layernorm_eps"],
             device=device,
         )
         self.attention = SelfAttention(args, self.use_cache, device=device)

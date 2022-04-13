@@ -6,25 +6,25 @@ import math
 class SelfAttention(nn.Module):
     def __init__(self, args, use_cache=False, device=None):
         super().__init__()
-        self.hidden_size = args.hidden_size
+        self.embedding_dim = args["embedding_dim"]
         self.use_cache = use_cache
-        self.num_attention_heads = args.num_attention_heads
-        self.hidden_size_per_attention_head = args.hidden_size // args.num_attention_heads
-        self.rotary_ndims = int(self.hidden_size_per_attention_head * args.rotary_pct)
+        self.num_attention_heads = args["num_attention_heads"]
+        self.embedding_dim_per_attention_head = args["embedding_dim"] // args["num_attention_heads"]
+        self.rotary_ndims = int(self.embedding_dim_per_attention_head * args["rotary_pct"])
         self.rotary_emb = RotaryEmbedding(
             self.rotary_ndims,
-            base=args.rotary_emb_base,
+            base=args["rotary_emb_base"],
             device=device,
         )
         self.query_key_value = nn.Linear(
-            args.hidden_size,
-            3 * args.hidden_size,
+            args["embedding_dim"],
+            3 * args["embedding_dim"],
             device=device,
         )
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        self.norm_factor = math.sqrt(self.embedding_dim_per_attention_head)
         self.dense = nn.Linear(
-            args.hidden_size,
-            args.hidden_size,
+            args["embedding_dim"],
+            args["embedding_dim"],
             device=device,
         )
 
@@ -38,14 +38,14 @@ class SelfAttention(nn.Module):
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_qkv_shape = qkv.size()[:-1] + (
             self.num_attention_heads,
-            3 * self.hidden_size_per_attention_head,
+            3 * self.embedding_dim_per_attention_head,
         )
         qkv = qkv.view(*new_qkv_shape)
 
         # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
-        query_layer = qkv[..., :self.hidden_size_per_attention_head]
-        key_layer = qkv[..., self.hidden_size_per_attention_head: 2 * self.hidden_size_per_attention_head]
-        value_layer = qkv[..., 2 * self.hidden_size_per_attention_head:]
+        query_layer = qkv[..., :self.embedding_dim_per_attention_head]
+        key_layer = qkv[..., self.embedding_dim_per_attention_head: 2 * self.embedding_dim_per_attention_head]
+        value_layer = qkv[..., 2 * self.embedding_dim_per_attention_head:]
 
         # Compute rotary embeddings
         query_rot, query_pass = (
@@ -90,7 +90,7 @@ class SelfAttention(nn.Module):
 
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size,
+            self.embedding_dim,
         )
         context_layer = context_layer.view(*new_context_layer_shape)
 

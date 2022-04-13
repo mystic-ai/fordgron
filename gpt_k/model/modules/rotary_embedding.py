@@ -3,9 +3,9 @@ import torch.nn as nn
 
 class RotaryEmbedding(nn.Module):
 
-    def __init__(self, dim, base=10000, device=None):
+    def __init__(self, num_rotary_dims, base=10000, device=None):
         super().__init__()
-        inv_freq = 1. / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        inv_freq = 1. / (base ** (torch.arange(0, num_rotary_dims, 2).float().to(device) / num_rotary_dims))
         self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len_cached = None
         self.cos_cached = None

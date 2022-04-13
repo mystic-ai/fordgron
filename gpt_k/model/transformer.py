@@ -17,13 +17,13 @@ class Transformer(nn.Module):
         self.use_cache = use_cache
 
         with Progress() as progress:
-            task1 = progress.add_task("building transformer", total=args.num_layers + 3) # depth + three other steps
+            task1 = progress.add_task("building transformer", total=args["depth"] + 3) # depth + three other steps
 
             """
             embedding layer which acts as a fancy lookup table, projecting the token id (integer) to a vector with dimension embedding_dim
             since this embedding vector is trained with the model, it has learned 'representations' of that token by how it relates to others, aka 'the meaning of' that token
             """
-            self.token_id_embedding = nn.Embedding(args.vocab_size, args.hidden_size, device=device)
+            self.token_id_embedding = nn.Embedding(args["vocab_len"], args["embedding_dim"], device=device)
             progress.update(task1, advance=1)
 
             """
@@ -32,7 +32,7 @@ class Transformer(nn.Module):
             the first block receives the 'embedded' tokens, and each block ouptuts a tensor with that same shape
             """
             self.decoder_stack = nn.ModuleList([])
-            for layer_i in range(args.num_layers):
+            for layer_i in range(args["depth"]):
                 self.decoder_stack.append(TransformerBlock(args, use_cache, device=device))
                 progress.update(task1, advance=1)
 
@@ -41,8 +41,8 @@ class Transformer(nn.Module):
             supposedly this creates norm invariance without requiring weight standardisation (in other words, it makes training more stable)
             """
             self.final_layer_norm = nn.LayerNorm(
-                args.hidden_size,
-                eps=args.layernorm_epsilon,
+                args["embedding_dim"],
+                eps=args["layernorm_eps"],
                 device=device,
             )
             progress.update(task1, advance=1)
@@ -52,8 +52,8 @@ class Transformer(nn.Module):
             at this stage the model outputs logits which we can sample in order to select the next token in the generation process, bearing in mind that the next token must be in the vocab (and therefore its token id will be represented by one item in the vocab_len vector)
             """
             self.logits = nn.Linear(
-                args.hidden_size,
-                args.vocab_size,
+                args["embedding_dim"],
+                args["vocab_len"],
                 bias=False,
                 device=device,
             )
