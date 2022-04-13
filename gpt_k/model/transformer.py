@@ -58,6 +58,8 @@ class Transformer(nn.Module):
                 device=device,
             )
             progress.update(task1, advance=1)
+        
+        self.swap_batch_len_and_seq_len = args["swap_batch_len_and_seq_len"]
 
     def forward(self, X, attention_mask=None, layer_past=None):
         """
@@ -73,6 +75,7 @@ class Transformer(nn.Module):
         """
         atm a new mask is built on each forward pass, although it is likely possible that they can be cached (but this should be benchmarked)
         attention_mask is a tensor of Trues and Falses where the indices of all masked tokens are False
+        0.000_028_371810913085938 s
         """
         if attention_mask is None:
             attention_mask = generate_mask(X.size(1)).to(X.device)
@@ -80,6 +83,7 @@ class Transformer(nn.Module):
         """
         if caching of keys and values from the previous forward pass is enabled
         on the first forward pass there will be no layer_past, but all subsequent generations will be able to use the cache
+        0.000_009_059906005859375 s
         """
         if self.use_cache:
             if layer_past is None:
@@ -105,14 +109,20 @@ class Transformer(nn.Module):
         """
         setup is complete, now we need to pass the inputs through the transformer. see the init function for details on what each module does
         X = [batch_len, input_seq_len]
+        0.000_025_033950805664062 s
         """
-
         hidden_states = self.token_id_embedding(X) # [batch_len, input_seq_len, embedding_dim]
 
-        hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [input_seq_len, batch_len, embedding_dim]
+        """
+        some models were trained with batch_len and seq_len swapped, so during inference it's necessary to perform the swap in order to make the weights work
+        0.000_006_198883056640625 s
+        """
+        if self.swap_batch_len_and_seq_len:
+            hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [input_seq_len, batch_len, embedding_dim]
 
         """
         we must manually pass the hidden states through each layer of the stack in order to set the true layer_past and extract the kv_cache
+        0.029_156_68487548828 s
         """
         for layer_i, transformer_block in enumerate(self.decoder_stack):
             hidden_states, kv_cache = transformer_block(
@@ -122,10 +132,22 @@ class Transformer(nn.Module):
             ) # [input_seq_len, batch_len, embedding_dim]
             kv_cache_list.append(kv_cache)
 
-        hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [batch_len, input_seq_len, embedding_dim]
+        """
+        reverse the dimension swap if necessary
+        0.000_005_0067901611328125 s
+        """
+        if self.swap_batch_len_and_seq_len:
+            hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [input_seq_len, batch_len, embedding_dim]
 
+        """
+        pass through a final layer norm
+        0.000_381_70814514160156 s
+        """
         hidden_states = self.final_layer_norm(hidden_states) # [batch_len, input_seq_len, embedding_dim]
 
+        """
+        0.000_022_88818359375
+        """
         logits = self.logits(hidden_states) # [batch_len, input_seq_len, vocab_len]
 
         """
