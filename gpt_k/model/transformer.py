@@ -78,7 +78,7 @@ class Transformer(nn.Module):
         0.000_028_371810913085938 s
         """
         if attention_mask is None:
-            attention_mask = generate_mask(X.size(1)).to(X.device)
+            attention_mask = generate_mask(X.size(1), swap_batch_len_and_seq_len=self.swap_batch_len_and_seq_len).to(X.device)
 
         """
         if caching of keys and values from the previous forward pass is enabled
@@ -163,5 +163,8 @@ class Transformer(nn.Module):
         return X.transpose(dim_1, dim_2).contiguous()
 
 
-def generate_mask(seq_len):
-    return torch.tril(torch.ones((1, 1, seq_len, seq_len), dtype=torch.bool))
+def generate_mask(seq_len, swap_batch_len_and_seq_len=False):
+    if swap_batch_len_and_seq_len: # if batch and seq are swapped
+        return torch.tril(torch.ones((1, 1, seq_len, seq_len), dtype=torch.bool))
+    else:
+        return torch.tril(torch.ones((seq_len, seq_len, 1, 1), dtype=torch.bool))

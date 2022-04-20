@@ -4,6 +4,7 @@ import copy
 import torch.nn.functional as F
 from torch import nn
 import time
+from rich.progress import Progress
 
 def stream_token_ids(
     model: nn.Module,
@@ -35,43 +36,46 @@ def stream_token_ids(
         layer_past = None
 
         num_tokens_to_generate = inference_kwargs["generation_length"] - input_seq_len
-        for _ in range(num_tokens_to_generate):
-            if inference_kwargs["use_cache"]:
-                logits, layer_past = model(prompt_token_ids, layer_past=layer_past) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
-                # everything after this point is taking 0.04563331604003906 s.
-                # collapse the sequence length dimension, because it will be 1 anyway
-                generated_token_logits = (
-                    logits[:, -1].view(batch_len, -1).contiguous()
-                ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
+        with Progress() as progress:
+            task1 = progress.add_task("inferencing", total=num_tokens_to_generate)
+            for _ in range(num_tokens_to_generate):
+                if inference_kwargs["use_cache"]:
+                    logits, layer_past = model(prompt_token_ids, layer_past=layer_past) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
+                    # everything after this point is taking 0.04563331604003906 s.
+                    # collapse the sequence length dimension, because it will be 1 anyway
+                    generated_token_logits = (
+                        logits[:, -1].view(batch_len, -1).contiguous()
+                    ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
 
-            # sample token id of the to be generated token
-            # if sampling is set to be deterministic (aka greedy decoding) then simply return the logit with the highest probability
-            if inference_kwargs["temperature"] == 0 and inference_kwargs["top_k"] == 0 and inference_kwargs["top_p"] == 0:
-                generated_token_ids = torch.argmax(
-                    generated_token_logits, dim=-1
-                ).view(-1) # [batch_len]
-            else:
-                generated_token_logits = generated_token_logits.float() # 0.000_015_020370483398438 s
+                # sample token id of the to be generated token
+                # if sampling is set to be deterministic (aka greedy decoding) then simply return the logit with the highest probability
+                if inference_kwargs["temperature"] == 0 and inference_kwargs["top_k"] == 0 and inference_kwargs["top_p"] == 0:
+                    generated_token_ids = torch.argmax(
+                        generated_token_logits, dim=-1
+                    ).view(-1) # [batch_len]
+                else:
+                    generated_token_logits = generated_token_logits.float() # 0.000_015_020370483398438 s
 
-                if inference_kwargs["temperature"] > 0:
-                    # divide the logits by the temperature, this scales logit confidence downwards (or upwards), taking inspiration from thermodynamics
-                    # 0.000_460_62469482421875 s
-                    generated_token_logits = generated_token_logits / inference_kwargs["temperature"]
+                    if inference_kwargs["temperature"] > 0:
+                        # divide the logits by the temperature, this scales logit confidence downwards (or upwards), taking inspiration from thermodynamics
+                        # 0.000_460_62469482421875 s
+                        generated_token_logits = generated_token_logits / inference_kwargs["temperature"]
 
-                generated_token_logits = filter_logits(
-                    generated_token_logits, top_k=inference_kwargs["top_k"], top_p=inference_kwargs["top_p"]
-                ) # 0.044_772_62496948242 s
+                    generated_token_logits = filter_logits(
+                        generated_token_logits, top_k=inference_kwargs["top_k"], top_p=inference_kwargs["top_p"]
+                    ) # 0.044_772_62496948242 s
 
-                # spread the logits so they're in between 0 and 1, so the next stage of sampling is super easy
-                generated_token_ids = F.softmax(generated_token_logits, dim=-1) # 0.000_012_159347534179688 s
-                # categorical distribution
-                generated_token_ids = torch.multinomial(
-                    generated_token_ids, num_samples=1
-                ).view(-1) # [batch_size] 0.000_165_2240753173828 s
+                    # spread the logits so they're in between 0 and 1, so the next stage of sampling is super easy
+                    generated_token_ids = F.softmax(generated_token_logits, dim=-1) # 0.000_012_159347534179688 s
+                    # categorical distribution
+                    generated_token_ids = torch.multinomial(
+                        generated_token_ids, num_samples=1
+                    ).view(-1) # [batch_size] 0.000_165_2240753173828 s
 
-            # add the generated token id back into the prompt
-            prompt_token_ids = generated_token_ids.unsqueeze(0)
-            yield generated_token_ids
+                # add the generated token id back into the prompt
+                prompt_token_ids = generated_token_ids.unsqueeze(0)
+                progress.update(task1, advance=1)
+                yield generated_token_ids
 
 
 def filter_logits(logits: torch.Tensor, top_k:int = 0, top_p: float = 0.0, filter_value: float = -float("Inf")):
@@ -116,8 +120,12 @@ def filter_logits(logits: torch.Tensor, top_k:int = 0, top_p: float = 0.0, filte
         sorted_indices_to_remove[..., 0] = 0
 
         # for each sequence in the batch, replace the masked elements (i.e. not within top_p) with the very huge negative number to minimise the sampling of them
-        for i in range(descending_logits_indices.size(0)):
-            indices_to_remove = descending_logits_indices[i][sorted_indices_to_remove[i]] # 0.044_241_42837524414 s THIS IS THE SLOW OFFENDING LINE
-            logits[i][indices_to_remove] = filter_value # 0.000_038_38539123535156 s
+        for batch_index in range(descending_logits_indices.size(0)):
+            now = time.time()
+            ya = descending_logits_indices[batch_index]
+            now = time.time()
+            ba = sorted_indices_to_remove[batch_index]
+            indices_to_remove = descending_logits_indices[batch_index][sorted_indices_to_remove[batch_index]] # 0.044_241_42837524414 s THIS IS THE SLOW OFFENDING LINE
+            logits[batch_index][indices_to_remove] = filter_value # 0.000_038_38539123535156 s
 
     return logits
