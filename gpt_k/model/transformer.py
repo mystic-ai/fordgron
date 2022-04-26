@@ -1,7 +1,6 @@
 import torch.nn as nn
 import torch
 import math
-from rich.progress import Progress
 
 from .modules import TransformerBlock
 
@@ -15,51 +14,43 @@ class Transformer(nn.Module):
         by preventing this extra computation, inference can be a little faster at the cost of model performance (I believe, although there seems to be 0 research on this)
         """
         self.use_cache = use_cache
-
-        with Progress() as progress:
-            task1 = progress.add_task("building transformer", total=args["depth"] + 3) # depth + three other steps
-
-            """
-            embedding layer which acts as a fancy lookup table, projecting the token id (integer) to a vector with dimension embedding_dim
-            since this embedding vector is trained with the model, it has learned 'representations' of that token by how it relates to others, aka 'the meaning of' that token
-            """
-            self.token_id_embedding = nn.Embedding(args["vocab_len"], args["embedding_dim"], device=device)
-            progress.update(task1, advance=1)
-
-            """
-            the core of the transformer is a stack of transformer blocks, each of which essentially applies self-attention (and a few other tricks) to the output of the previous block
-            atm this is a decoder-only architecture like GPT-2, but eventually it will be extended to include encoders
-            the first block receives the 'embedded' tokens, and each block ouptuts a tensor with that same shape
-            """
-            self.decoder_stack = nn.ModuleList([])
-            for layer_i in range(args["depth"]):
-                self.decoder_stack.append(TransformerBlock(args, use_cache, device=device))
-                progress.update(task1, advance=1)
-
-            """
-            after the final transformer block there is an additional layer norm (pattern set by GPT-2)
-            supposedly this creates norm invariance without requiring weight standardisation (in other words, it makes training more stable)
-            """
-            self.final_layer_norm = nn.LayerNorm(
-                args["embedding_dim"],
-                eps=args["layernorm_eps"],
-                device=device,
-            )
-            progress.update(task1, advance=1)
-
-            """
-            finally the model needs to 'reverse the embedding' by projecting the hidden states of attended tokens out into a vector with dimension vocab_len
-            at this stage the model outputs logits which we can sample in order to select the next token in the generation process, bearing in mind that the next token must be in the vocab (and therefore its token id will be represented by one item in the vocab_len vector)
-            """
-            self.logits = nn.Linear(
-                args["embedding_dim"],
-                args["vocab_len"],
-                bias=False,
-                device=device,
-            )
-            progress.update(task1, advance=1)
-        
         self.swap_batch_len_and_seq_len = args["swap_batch_len_and_seq_len"]
+
+        """
+        embedding layer which acts as a fancy lookup table, projecting the token id (integer) to a vector with dimension embedding_dim
+        since this embedding vector is trained with the model, it has learned 'representations' of that token by how it relates to others, aka 'the meaning of' that token
+        """
+        self.token_id_embedding = nn.Embedding(args["vocab_len"], args["embedding_dim"], device=device)
+
+        """
+        the core of the transformer is a stack of transformer blocks, each of which essentially applies self-attention (and a few other tricks) to the output of the previous block
+        atm this is a decoder-only architecture like GPT-2, but eventually it will be extended to include encoders
+        the first block receives the 'embedded' tokens, and each block ouptuts a tensor with that same shape
+        """
+        self.decoder_stack = nn.ModuleList([])
+        for layer_i in range(args["depth"]):
+            self.decoder_stack.append(TransformerBlock(args, use_cache, device=device))
+
+        """
+        after the final transformer block there is an additional layer norm (pattern set by GPT-2)
+        supposedly this creates norm invariance without requiring weight standardisation (in other words, it makes training more stable)
+        """
+        self.final_layer_norm = nn.LayerNorm(
+            args["embedding_dim"],
+            eps=args["layernorm_eps"],
+            device=device,
+        )
+
+        """
+        finally the model needs to 'reverse the embedding' by projecting the hidden states of attended tokens out into a vector with dimension vocab_len
+        at this stage the model outputs logits which we can sample in order to select the next token in the generation process, bearing in mind that the next token must be in the vocab (and therefore its token id will be represented by one item in the vocab_len vector)
+        """
+        self.logits = nn.Linear(
+            args["embedding_dim"],
+            args["vocab_len"],
+            bias=False,
+            device=device,
+        )
 
     def forward(self, X, attention_mask=None, layer_past=None):
         """
@@ -164,7 +155,7 @@ class Transformer(nn.Module):
 
 
 def generate_mask(seq_len, swap_batch_len_and_seq_len=False):
-    if swap_batch_len_and_seq_len: # if batch and seq are swapped
+    if swap_batch_len_and_seq_len:
         return torch.tril(torch.ones((1, 1, seq_len, seq_len), dtype=torch.bool))
     else:
-        return torch.tril(torch.ones((seq_len, seq_len, 1, 1), dtype=torch.bool))
+        return torch.tril(torch.ones((seq_len, 1, 1, 1), dtype=torch.bool))

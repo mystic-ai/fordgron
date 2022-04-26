@@ -20,6 +20,10 @@ class TransformerBlock(nn.Module):
         self.mlp = MLP(args)
 
     def forward(self, x, attention_mask, layer_past=None):
+        """
+        Args:
+            x: torch.Tensor [batch_len, seq_len, embedding_dim] = embedded input
+        """
         residual = x
         ln_output = self.input_layernorm(x)
         attention_output, kv_cache = self.attention(

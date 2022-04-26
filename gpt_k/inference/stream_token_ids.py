@@ -70,10 +70,10 @@ def stream_token_ids(
                     # categorical distribution
                     generated_token_ids = torch.multinomial(
                         generated_token_ids, num_samples=1
-                    ).view(-1) # [batch_size] 0.000_165_2240753173828 s
+                    ).view(-1) # [batch_len] 0.000_165_2240753173828 s
 
                 # add the generated token id back into the prompt
-                prompt_token_ids = generated_token_ids.unsqueeze(0)
+                prompt_token_ids = generated_token_ids.view(-1, 1) # [batch_len, 1] since we're using caching this will always be 1 i.e. the generated token
                 progress.update(task1, advance=1)
                 yield generated_token_ids
 
