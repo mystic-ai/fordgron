@@ -6,14 +6,14 @@ from .modules import TransformerBlock
 
 
 class Transformer(nn.Module):
-    def __init__(self, args, use_cache=False, device=None):
+    def __init__(self, args, device=None):
         super().__init__()
 
         """
         if use_cache is True, then the keys and values from the previous transformer block are saved and sent to the next transformer block
         by preventing this extra computation, inference can be a little faster at the cost of model performance (I believe, although there seems to be 0 research on this)
         """
-        self.use_cache = use_cache
+        self.use_cache = args["use_cache"]
         self.swap_batch_len_and_seq_len = args["swap_batch_len_and_seq_len"]
 
         """
@@ -29,7 +29,7 @@ class Transformer(nn.Module):
         """
         self.decoder_stack = nn.ModuleList([])
         for layer_i in range(args["depth"]):
-            self.decoder_stack.append(TransformerBlock(args, use_cache, device=device))
+            self.decoder_stack.append(TransformerBlock(args, self.use_cache, device=device))
 
         """
         after the final transformer block there is an additional layer norm (pattern set by GPT-2)
@@ -116,12 +116,19 @@ class Transformer(nn.Module):
         0.029_156_68487548828 s
         """
         for layer_i, transformer_block in enumerate(self.decoder_stack):
-            hidden_states, kv_cache = transformer_block(
-                hidden_states,
-                attention_mask=attention_mask,
-                layer_past=layer_past[layer_i],
-            ) # [input_seq_len, batch_len, embedding_dim]
-            kv_cache_list.append(kv_cache)
+            if self.use_cache:
+                hidden_states, kv_cache = transformer_block(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    layer_past=layer_past[layer_i],
+                ) # [input_seq_len, batch_len, embedding_dim]
+                kv_cache_list.append(kv_cache)
+            else:
+                hidden_states = transformer_block(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    layer_past=layer_past[layer_i],
+                ) # [input_seq_len, batch_len, embedding_dim]
 
         """
         reverse the dimension swap if necessary

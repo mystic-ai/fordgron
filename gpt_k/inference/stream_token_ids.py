@@ -46,6 +46,13 @@ def stream_token_ids(
                     generated_token_logits = (
                         logits[:, -1].view(batch_len, -1).contiguous()
                     ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
+                else:
+                    logits = model(prompt_token_ids) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
+                    # everything after this point is taking 0.04563331604003906 s.
+                    # collapse the sequence length dimension, because it will be 1 anyway
+                    generated_token_logits = (
+                        logits[:, -1].view(batch_len, -1).contiguous()
+                    ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
 
                 # sample token id of the to be generated token
                 # if sampling is set to be deterministic (aka greedy decoding) then simply return the logit with the highest probability

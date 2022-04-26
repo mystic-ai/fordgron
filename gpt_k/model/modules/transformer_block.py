@@ -26,12 +26,15 @@ class TransformerBlock(nn.Module):
         """
         residual = x
         ln_output = self.input_layernorm(x)
-        attention_output, kv_cache = self.attention(
+        """ attention_output, kv_cache = self.attention(
             ln_output,
             attention_mask,
             layer_past=layer_past,
-        )
+        ) """
         post_attn_ln = self.post_attention_layernorm(x)
         mlp_output = self.mlp(hidden_states=post_attn_ln)
-        output = residual + mlp_output + attention_output
-        return output, kv_cache
+        output = residual + mlp_output # + attention_output
+        if self.use_cache:
+            return output, kv_cache
+        else:
+            return output
