@@ -48,7 +48,7 @@ class Transformer(nn.Module):
         self.logits = nn.Linear(
             args["embedding_dim"],
             args["vocab_len"],
-            bias=False,
+            bias=True, # True on J, False on 20B
             device=device,
         )
 
@@ -110,7 +110,7 @@ class Transformer(nn.Module):
         """
         if self.swap_batch_len_and_seq_len:
             hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [input_seq_len, batch_len, embedding_dim]
-
+    
         """
         we must manually pass the hidden states through each layer of the stack in order to set the true layer_past and extract the kv_cache
         0.029_156_68487548828 s
@@ -131,6 +131,8 @@ class Transformer(nn.Module):
                 ) # [input_seq_len, batch_len, embedding_dim]
 
         """
+
+
         reverse the dimension swap if necessary
         0.000_005_0067901611328125 s
         """
