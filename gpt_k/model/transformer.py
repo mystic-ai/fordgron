@@ -64,6 +64,13 @@ class Transformer(nn.Module):
         """
 
         """
+        setup is complete, now we need to pass the inputs through the transformer. see the init function for details on what each module does
+        X = [batch_len, input_seq_len]
+        0.000_025_033950805664062 s
+        """
+        hidden_states = self.token_id_embedding(X) # [batch_len, input_seq_len, embedding_dim]
+
+        """
         atm a new mask is built on each forward pass, although it is likely possible that they can be cached (but this should be benchmarked)
         attention_mask is a tensor of Trues and Falses where the indices of all masked tokens are False
         0.000_028_371810913085938 s
@@ -96,13 +103,6 @@ class Transformer(nn.Module):
         if layer_past is None:
             layer_past = [None] * len(self.decoder_stack)
         kv_cache_list = []
-
-        """
-        setup is complete, now we need to pass the inputs through the transformer. see the init function for details on what each module does
-        X = [batch_len, input_seq_len]
-        0.000_025_033950805664062 s
-        """
-        hidden_states = self.token_id_embedding(X) # [batch_len, input_seq_len, embedding_dim]
 
         """
         some models were trained with batch_len and seq_len swapped, so during inference it's necessary to perform the swap in order to make the weights work
