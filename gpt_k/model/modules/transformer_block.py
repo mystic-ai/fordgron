@@ -1,50 +1,40 @@
 import torch.nn as nn
-from .self_attention import SelfAttention, JSelfAttention
+from .self_attention import SelfAttention
 from .mlp import MLP
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args, use_cache, device=None):
+    def __init__(self, args, device=None):
         super().__init__()
-        self.use_cache = use_cache
-        self.input_layernorm = nn.LayerNorm(
+        self.layernorm_1 = nn.LayerNorm(
             args["embedding_dim"],
             eps=args["layernorm_eps"],
             device=device,
         )
         self.use_pa_ln = args["use_pa_ln"]
         if self.use_pa_ln:
-            self.post_attention_layernorm = nn.LayerNorm(
+            self.layernorm_2 = nn.LayerNorm(
                 args["embedding_dim"],
                 eps=args["layernorm_eps"],
                 device=device,
             )
-        self.attention = JSelfAttention(args, self.use_cache, device=device)
+        self.attention = SelfAttention(args, device=device)
         self.mlp = MLP(args)
 
-    def forward(self, x, attention_mask, layer_past=None):
+    def forward(self, X, attention_mask, layer_past=None):
         """
         Args:
-            x: torch.Tensor [batch_len, seq_len, embedding_dim] = embedded input
+            X: torch.Tensor [batch_len, seq_len, embedding_dim] = embedded input
         """
-        residual = x
-        x = self.input_layernorm(x)
-        if self.use_cache:
-            attention_output, kv_cache = self.attention(
-                x,
-                attention_mask,
-                layer_past=layer_past,
-            )
-        else:
-            attention_output = self.attention(
-                x,
-                attention_mask,
-                layer_past=layer_past,
-            )
+        residual = X
+        hidden_states = self.layernorm_1(X)
+        attention_output = self.attention(
+            hidden_states,
+            attention_mask,
+        )
+        hidden_states = attention_output + residual
+        residual = hidden_states
         if self.use_pa_ln:
-            x = self.post_attention_layernorm(x)
-        mlp_output = self.mlp(hidden_states=x)
-        output = residual + mlp_output + attention_output
-        if self.use_cache:
-            return output, kv_cache
-        else:
-            return output
+            hidden_states = self.layernorm_2(hidden_states)
+        mlp_output = self.mlp(hidden_states)
+        output = mlp_output + residual
+        return output

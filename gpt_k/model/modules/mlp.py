@@ -8,8 +8,8 @@ class MLP(nn.Module):
         self.dense_h_to_4h = nn.Linear(args["embedding_dim"], ff_dim, device=device)
         self.dense_4h_to_h = nn.Linear(ff_dim, args["embedding_dim"], device=device)
 
-    def forward(self, hidden_states):
-        intermediate_parallel = self.dense_h_to_4h(hidden_states)
+    def forward(self, X):
+        intermediate_parallel = self.dense_h_to_4h(X)
         intermediate_parallel = bias_gelu_impl(intermediate_parallel)
         output = self.dense_4h_to_h(intermediate_parallel)
         return output

@@ -10,7 +10,7 @@ def stream_token_ids(
     model: nn.Module,
     inference_kwargs: dict,
     prompt_token_ids: List[List[int]],
-    model_seq_len: int
+    model_seq_len: int,
 ):
     """
     Args:
@@ -27,32 +27,23 @@ def stream_token_ids(
     model.eval()
 
     # convert to tensor
-    prompt_token_ids = torch.IntTensor(prompt_token_ids).to(1)
+    prompt_token_ids = torch.IntTensor(prompt_token_ids).to(inference_kwargs["device"])
 
     batch_len, input_seq_len = prompt_token_ids.size()
 
     with torch.no_grad():
         # initialise layer_past as an empty variable, for it will be populated on future forward passes
-        layer_past = None
 
         num_tokens_to_generate = inference_kwargs["generation_length"] - input_seq_len
         with Progress() as progress:
             task1 = progress.add_task("inferencing", total=num_tokens_to_generate)
             for _ in range(num_tokens_to_generate):
-                if inference_kwargs["use_cache"]:
-                    logits, layer_past = model(prompt_token_ids, layer_past=layer_past) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
-                    # everything after this point is taking 0.04563331604003906 s.
-                    # collapse the sequence length dimension, because it will be 1 anyway
-                    generated_token_logits = (
-                        logits[:, -1].view(batch_len, -1).contiguous()
-                    ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
-                else:
-                    logits = model(prompt_token_ids) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
-                    # everything after this point is taking 0.04563331604003906 s.
-                    # collapse the sequence length dimension, because it will be 1 anyway
-                    generated_token_logits = (
-                        logits[:, -1].view(batch_len, -1).contiguous()
-                    ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
+                logits = model(prompt_token_ids) # logits: [batch_len, seq_len, vocab_len] # 0.029_550_552368164062 s
+                # everything after this point is taking 0.04563331604003906 s.
+                # collapse the sequence length dimension, because it will be 1 anyway
+                generated_token_logits = (
+                    logits[:, -1].view(batch_len, -1).contiguous()
+                ) # [batch_len, vocab_len] # 0.000_015_735626220703125 s
 
                 # sample token id of the to be generated token
                 # if sampling is set to be deterministic (aka greedy decoding) then simply return the logit with the highest probability
@@ -80,7 +71,7 @@ def stream_token_ids(
                     ).view(-1) # [batch_len] 0.000_165_2240753173828 s
 
                 # add the generated token id back into the prompt
-                prompt_token_ids = generated_token_ids.view(-1, 1) # [batch_len, 1] since we're using caching this will always be 1 i.e. the generated token
+                prompt_token_ids = torch.cat((prompt_token_ids, generated_token_ids.unsqueeze(0)), dim=-1) # [batch_len, 1] since we're using caching this will always be 1 i.e. the generated token
                 progress.update(task1, advance=1)
                 yield generated_token_ids
 
