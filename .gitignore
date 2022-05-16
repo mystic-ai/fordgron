@@ -129,3 +129,13 @@ dmypy.json
 .pyre/
 
 .DS_Store
+*jsonl.zst
+*pt
+generate.ipynb
+wandb
+poetry.lock
+
+*.bin
+*.idx
+*.jsonl
+*.jsonl.zst
