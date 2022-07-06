@@ -139,6 +139,7 @@ poetry.lock
 *.idx
 *.jsonl
 *.jsonl.zst
+*.gz
 
 will-dalle-files
 gpt_j.py

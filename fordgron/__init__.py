@@ -1,2 +1,2 @@
-from .model import transformer
+from .model import transformer, DALLE
 from .dataloader import PileDataset

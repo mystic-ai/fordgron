@@ -1,12 +1,9 @@
-from gpt_k.model.dall_e import MinDalle
+from gpt_k import DALLE
 import time
 import torch
-from transformers import AutoTokenizer
 from transformers import GPTJForCausalLM as TransformersGPTJ
 from gpt_k.inference import stream_token_ids
 from os.path import exists
-
-tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
 
 model_kwargs = {
     "depth": 12,
@@ -37,7 +34,7 @@ for file in required_files:
     if not exists(file[1]):
         download_file(file[0], file[1])
 
-model = MinDalle(model_kwargs, is_reusable=True, models_root="./de-weights").to(model_kwargs["device"])
+model = DALLE(model_kwargs, is_reusable=True, models_root="./de-weights").to(model_kwargs["device"])
 model.encoder.load_state_dict(torch.load("./will-dalle-files/mini/encoder.pt"), strict=False)
 model.decoder.load_state_dict(torch.load("./will-dalle-files/mini/decoder.pt"), strict=False)
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))

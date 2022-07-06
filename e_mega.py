@@ -1,4 +1,4 @@
-from gpt_k.model.dall_e import MinDalle
+from gpt_k import DALLE
 import time
 import torch
 from transformers import AutoTokenizer
@@ -38,7 +38,7 @@ for file in required_files:
     if not exists(file[1]):
         download_file(file[0], file[1])
 
-model = MinDalle(model_kwargs, is_reusable=True).to(model_kwargs["device"])
+model = DALLE(model_kwargs, is_reusable=True).to(model_kwargs["device"])
 model.encoder.load_state_dict(torch.load("./will-dalle-files/mega/encoder.pt"), strict=False)
 model.decoder.load_state_dict(torch.load("./will-dalle-files/mega/decoder.pt"), strict=False)
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))

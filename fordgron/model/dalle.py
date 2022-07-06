@@ -615,12 +615,11 @@ from typing import Iterator
 torch.set_grad_enabled(False)
 # torch.set_num_threads(os.cpu_count())
 
-class MinDalle(nn.Module):
+class DALLE(nn.Module):
     def __init__(
         self,
         args,
         is_reusable: bool = True,
-        models_root: str = 'pretrained',
     ):
         super().__init__()
         self.is_reusable = is_reusable
