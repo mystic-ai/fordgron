@@ -69,14 +69,13 @@ class Transformer(nn.Module):
         0.000_025_033950805664062 s
         """
         hidden_states = self.token_id_embedding(X) # [batch_len, input_seq_len, embedding_dim]
-
         """
         atm a new mask is built on each forward pass, although it is likely possible that they can be cached (but this should be benchmarked)
         attention_mask is a tensor of Trues and Falses where the indices of all masked tokens are False
         0.000_028_371810913085938 s
         """
-        if attention_mask is None:
-            attention_mask = generate_mask(X.size(1), swap_batch_len_and_seq_len=self.swap_batch_len_and_seq_len).to(X.device)
+        """         if attention_mask is None:
+            attention_mask = generate_mask(X.size(1), swap_batch_len_and_seq_len=self.swap_batch_len_and_seq_len).to(X.device) """
 
         """
         if caching of keys and values from the previous forward pass is enabled
@@ -129,6 +128,8 @@ class Transformer(nn.Module):
                     attention_mask=attention_mask,
                     layer_past=layer_past[layer_i],
                 ) # [input_seq_len, batch_len, embedding_dim]
+            print(layer_i)
+            print(hidden_states)
 
         """
 
@@ -136,6 +137,10 @@ class Transformer(nn.Module):
         reverse the dimension swap if necessary
         0.000_005_0067901611328125 s
         """
+
+        print("after stack")
+        print(hidden_states)
+
         if self.swap_batch_len_and_seq_len:
             hidden_states = self.swap_dimensions(hidden_states, 0, 1) # [input_seq_len, batch_len, embedding_dim]
 
@@ -145,10 +150,16 @@ class Transformer(nn.Module):
         """
         hidden_states = self.final_layer_norm(hidden_states) # [batch_len, input_seq_len, embedding_dim]
 
+        print("after final layer norm")
+        print(hidden_states)
+
         """
         0.000_022_88818359375
         """
         logits = self.logits(hidden_states) # [batch_len, input_seq_len, vocab_len]
+
+        print("after logits")
+        print(logits)
 
         """
         only return the logits if kv_caching isn't on

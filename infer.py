@@ -31,9 +31,6 @@ def cleanup():
     # cleanup me within process group
     distributed.destroy_process_group()
 
-
-import wandb
-
 tokenizer = GPT2TokenizerFast.from_pretrained("EleutherAI/gpt-j-6B")
 
 def print_rank_0(*message):
@@ -48,6 +45,7 @@ def print_rank_0(*message):
 def infer(rank, world_size, params):
     try:
         if rank == 0 and params.use_wandb == True:
+                import wandb
                 wandb.login(key="a45c4a8186b144484151295c474916a11a2d2bb5")
                 wandb.init(project="gpt-k", entity="mystic-ai", config=vars(params))
         

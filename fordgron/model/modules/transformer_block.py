@@ -1,5 +1,5 @@
 import torch.nn as nn
-from .self_attention import SelfAttention, JSelfAttention
+from .self_attention import JSelfAttention
 from .mlp import MLP
 
 class TransformerBlock(nn.Module):
@@ -40,10 +40,18 @@ class TransformerBlock(nn.Module):
                 attention_mask,
                 layer_past=layer_past,
             )
-        if self.use_pa_ln:
-            x = self.post_attention_layernorm(x)
+        """         if self.use_pa_ln:
+            x = self.post_attention_layernorm(x) """
+        print("attention output")
+        print(attention_output)
         mlp_output = self.mlp(hidden_states=x)
+        print("mlp output")
+        print(mlp_output)
+        print("residual")
+        print(residual)
         output = residual + mlp_output + attention_output
+        print("grouped")
+        print(output)
         if self.use_cache:
             return output, kv_cache
         else:
