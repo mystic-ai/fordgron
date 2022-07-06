@@ -1,3 +1,5 @@
-# GPT-K
+# fordgron
 
-PyTorch implementation of transformers based on Peter Bloem's `former` library. http://peterbloem.nl/blog/transformers. Also used as guidance is OpenAI's `finetune-transformer-lm` work. https://openai.com/blog/language-unsupervised/. And PyTorch's standard implementations of transformers.
+PyTorch (where possible) implementations of popular models for the Pipeline Cloud collection.
+
+> "y ford gron" means "the round table" in Welsh
