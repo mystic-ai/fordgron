@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "gpt-k"
+name = "fordgron"
 version = "0.1.0"
 description = ""
 authors = ["William Eliot <william@mystic.ai>", "Paul Hetherington <paul@getneuro.ai>"]
 packages = [
-  {include="gpt_k"}
+  {include="fordgron"}
 ]
 
 [tool.poetry.dependencies]

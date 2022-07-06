@@ -1,9 +1,8 @@
-from gpt_k import DALLE
+from fordgron import DALLE
 import time
 import torch
 from transformers import AutoTokenizer
 from transformers import GPTJForCausalLM as TransformersGPTJ
-from gpt_k.inference import stream_token_ids
 from os.path import exists
 import requests
 
