@@ -19,7 +19,6 @@ tqdm = "^4.62.3"
 ftfy = "^6.0.3"
 lm-dataformat = "^0.0.20"
 wandb = "^0.12.10"
-pybind11 = "^2.9.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
