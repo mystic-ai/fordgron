@@ -9,7 +9,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.8"
-torch = "^1.10.2"
+torch = {url = "https://download.pytorch.org/whl/cu111/torch-1.10.0%2Bcu111-cp39-cp39-linux_x86_64.whl", optional = true}
 black = "^22.3.0"
 transformers = "^4.15.0"
 torchtext = "^0.11.1"
@@ -19,8 +19,6 @@ tqdm = "^4.62.3"
 ftfy = "^6.0.3"
 lm-dataformat = "^0.0.20"
 wandb = "^0.12.10"
-pybind11 = "^2.9.1"
-rich = "^12.0.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
