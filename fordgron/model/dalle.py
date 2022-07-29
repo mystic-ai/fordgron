@@ -1,7 +1,6 @@
 from typing import List
 import torch
 from torch import nn, BoolTensor, FloatTensor, LongTensor
-from transformers import BartTokenizerFast
 torch.set_grad_enabled(False)
 
 
@@ -26,9 +25,9 @@ class GLU(nn.Module):
 
 
 class AttentionBase(nn.Module):
-    def __init__(self, head_count: int, embedding_dim: int):
+    def __init__(self, num_attention_heads: int, embedding_dim: int):
         super().__init__()
-        self.head_count = head_count
+        self.num_attention_heads = num_attention_heads
         self.embedding_dim = embedding_dim
 
         self.k_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
@@ -45,9 +44,9 @@ class AttentionBase(nn.Module):
         queries: FloatTensor,
         attention_mask: BoolTensor
     ) -> FloatTensor:
-        keys = keys.reshape(keys.shape[:2] + (self.head_count, -1))
-        values = values.reshape(values.shape[:2] + (self.head_count, -1))
-        queries = queries.reshape(queries.shape[:2] + (self.head_count, -1))
+        keys = keys.reshape(keys.shape[:2] + (self.num_attention_heads, -1))
+        values = values.reshape(values.shape[:2] + (self.num_attention_heads, -1))
+        queries = queries.reshape(queries.shape[:2] + (self.num_attention_heads, -1))
         queries /= queries.shape[-1] ** 0.5
 
         attention_bias = torch.where(
@@ -86,10 +85,10 @@ class EncoderSelfAttention(AttentionBase):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, embedding_dim: int, head_count: int, glu_embedding_dim: int):
+    def __init__(self, embedding_dim: int, num_attention_heads: int, glu_embedding_dim: int):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = EncoderSelfAttention(head_count, embedding_dim)
+        self.self_attn = EncoderSelfAttention(num_attention_heads, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
     
@@ -125,7 +124,7 @@ class DalleBartEncoder(nn.Module):
         self.layers: List[EncoderLayer] = nn.ModuleList([
             EncoderLayer(
                 embedding_dim = embedding_dim,
-                head_count = num_attention_heads,
+                num_attention_heads = num_attention_heads,
                 glu_embedding_dim = glu_embedding_dim
             ) 
             for _ in range(depth)
@@ -163,7 +162,7 @@ class TextTokenizer:
         sep_token = self.token_from_subword['</s>']
         cls_token = self.token_from_subword['<s>']
         unk_token = self.token_from_subword['<unk>']
-        text = text.encode("ascii", errors="ignore").decode()
+        text = text.lower().encode("ascii", errors="ignore").decode()
         tokens = [
             self.token_from_subword.get(subword, unk_token)
             for word in text.split(" ") if len(word) > 0
@@ -213,8 +212,8 @@ class DecoderCrossAttention(AttentionBase):
 
 
 class DecoderSelfAttention(AttentionBase):
-    def __init__(self, head_count: int, embedding_dim: int):
-        super().__init__(head_count, embedding_dim)
+    def __init__(self, num_attention_heads: int, embedding_dim: int):
+        super().__init__(num_attention_heads, embedding_dim)
         token_indices = torch.arange(IMAGE_TOKEN_COUNT)
         if torch.cuda.is_available(): token_indices = token_indices.cuda()
         self.token_indices = token_indices
@@ -230,7 +229,8 @@ class DecoderSelfAttention(AttentionBase):
         queries = self.q_proj.forward(decoder_state)
         attn_mask = self.token_indices < token_index + 1
         attn_mask = attn_mask[None][[0] * decoder_state.shape[0]]
-        attention_state[:, token_index] = torch.cat([keys, values])
+        attn_state_new = torch.cat([keys, values]).to(attention_state.dtype)
+        attention_state[:, token_index] = attn_state_new
         batch_count = decoder_state.shape[0]
         keys = attention_state[:batch_count]
         values = attention_state[batch_count:]
@@ -241,16 +241,16 @@ class DecoderSelfAttention(AttentionBase):
 class DecoderLayer(nn.Module):
     def __init__(
         self, 
-        head_count: int, 
+        num_attention_heads: int, 
         embedding_dim: int,
         glu_embedding_dim: int
     ):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = DecoderSelfAttention(head_count, embedding_dim)
+        self.self_attn = DecoderSelfAttention(num_attention_heads, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.pre_encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.encoder_attn = DecoderCrossAttention(head_count, embedding_dim)
+        self.encoder_attn = DecoderCrossAttention(num_attention_heads, embedding_dim)
         self.encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
 
@@ -330,6 +330,7 @@ class DalleBartDecoder(nn.Module):
 
     def decode_step(
         self,
+        log2_k: int,
         log2_supercondition_factor: int,
         attention_mask: BoolTensor,
         encoder_state: FloatTensor,
@@ -360,7 +361,7 @@ class DalleBartDecoder(nn.Module):
             logits[image_count:, -1] * a
         )
 
-        top_logits, _ = logits.topk(50, dim=-1)
+        top_logits, _ = logits.topk(2 ** log2_k, dim=-1)
         probs = torch.where(
             logits < top_logits[:, [-1]],
             self.zero_prob,
@@ -372,6 +373,7 @@ class DalleBartDecoder(nn.Module):
     def decode_row(
         self,
         row_index: int,
+        log2_k: int,
         log2_supercondition_factor: int,
         encoder_state: FloatTensor,
         attention_mask: BoolTensor,
@@ -381,6 +383,7 @@ class DalleBartDecoder(nn.Module):
         for col_index in range(16):
             i = 16 * row_index + col_index
             probs, attention_state = self.decode_step(
+                log2_k = log2_k,
                 log2_supercondition_factor = log2_supercondition_factor,
                 attention_mask = attention_mask,
                 encoder_state = encoder_state,
@@ -511,7 +514,7 @@ class Upsample(Module):
         self.conv = Conv2d(n, n, 3, padding=1)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = self.upsample.forward(x)
+        x = self.upsample.forward(x.to(torch.float32))
         x = self.conv.forward(x)
         return x
 
@@ -602,7 +605,7 @@ class VQGanDetokenizer(Module):
         z = self.decoder.forward(z)
         z = z.permute(0, 2, 3, 1)
         z = z.clip(0.0, 1.0) * 255
-        return z
+        return 
 
 import os
 from PIL import Image
@@ -630,6 +633,7 @@ class DALLE(nn.Module):
         self.glu_embedding_dim = args["glu_embedding_dim"]
         self.text_vocab_len = args["text_vocab_len"]
         self.image_vocab_len = args["image_vocab_len"]
+        self.dtype = torch.float32
         with open(args["vocab_path"], 'r', encoding='utf8') as f:
             vocab = json.load(f)
         with open(args["merges_path"], 'r', encoding='utf8') as f:
@@ -651,7 +655,7 @@ class DALLE(nn.Module):
             depth = self.depth,
             start_token = self.image_vocab_len
         )
-        self.detokenizer = VQGanDetokenizer()
+        self.detokenizer = VQGanDetokenizer().eval()
         self.device = args["device"]
 
 
@@ -681,6 +685,7 @@ class DALLE(nn.Module):
         seed: int,
         grid_size: int,
         log2_mid_count: int,
+        log2_k: int = 6,
         log2_supercondition_factor: int = 3,
         is_verbose: bool = False
     ) -> Iterator[Image.Image]:
@@ -697,36 +702,41 @@ class DALLE(nn.Module):
 
         if not self.is_reusable: self.init_encoder()
         if is_verbose: print("encoding text tokens")
-        encoder_state = self.encoder.forward(text_tokens)
+        with torch.cuda.amp.autocast(dtype=self.dtype):
+            encoder_state = self.encoder.forward(text_tokens)
         if not self.is_reusable: del self.encoder
         if torch.cuda.is_available(): torch.cuda.empty_cache()
 
         if not self.is_reusable: self.init_decoder()
 
-        encoder_state, attention_mask, attention_state, image_tokens = ( 
-            self.decoder.decode_initial(
-                seed, 
-                grid_size ** 2, 
-                text_tokens, 
-                encoder_state
+        with torch.cuda.amp.autocast(dtype=self.dtype):
+            encoder_state, attention_mask, attention_state, image_tokens = ( 
+                self.decoder.decode_initial(
+                    seed, 
+                    grid_size ** 2, 
+                    text_tokens, 
+                    encoder_state
+                )
             )
-        )
 
         row_count = 16
         for row_index in range(row_count):
             if is_verbose: 
                 print('sampling row {} of {}'.format(row_index + 1, row_count))
-            attention_state, image_tokens = self.decoder.decode_row(
-                row_index,
-                log2_supercondition_factor,
-                encoder_state,
-                attention_mask,
-                attention_state,
-                image_tokens
-            )
-            if ((row_index + 1) * (2 ** log2_mid_count)) % row_count == 0:
-                tokens = image_tokens[:, 1:]
-                image = self.image_from_tokens(grid_size, tokens, is_verbose)
+            with torch.cuda.amp.autocast(dtype=self.dtype):
+                attention_state, image_tokens = self.decoder.decode_row(
+                    row_index,
+                    log2_k,
+                    log2_supercondition_factor,
+                    encoder_state,
+                    attention_mask,
+                    attention_state,
+                    image_tokens
+                )
+            with torch.cuda.amp.autocast(dtype=torch.float32):
+                if ((row_index + 1) * (2 ** log2_mid_count)) % row_count == 0:
+                    tokens = image_tokens[:, 1:]
+                    image = self.image_from_tokens(grid_size, tokens, is_verbose)
 
         return image
 
@@ -735,6 +745,7 @@ class DALLE(nn.Module):
         text: str,
         seed: int = -1,
         grid_size: int = 1,
+        log2_k: int = 6,
         log2_supercondition_factor: int = 3,
         is_verbose: bool = False
     ) -> Image.Image:
@@ -744,6 +755,7 @@ class DALLE(nn.Module):
             seed,
             grid_size,
             log2_mid_count,
+            log2_k,
             log2_supercondition_factor,
             is_verbose
         )
