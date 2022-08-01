@@ -5,20 +5,20 @@ import requests
 
 required_files = [
     (
-        "https://huggingface.co/kuprel/min-dalle/resolve/main/encoder_mini.pt",
-        "./will-dalle-files/mini/encoder.pt",
+        "https://huggingface.co/kuprel/min-dalle/resolve/main/encoder.pt",
+        "./will-dalle-files/mega/encoder.pt",
     ),
     (
-        "https://huggingface.co/kuprel/min-dalle/resolve/main/decoder_mini.pt",
-        "./will-dalle-files/mini/decoder.pt",
+        "https://huggingface.co/kuprel/min-dalle/resolve/main/decoder.pt",
+        "./will-dalle-files/mega/decoder.pt",
     ),
     (
-        "https://huggingface.co/kuprel/min-dalle/resolve/main/vocab_mini.json",
-        "./will-dalle-files/mini/vocab.json",
+        "https://huggingface.co/kuprel/min-dalle/resolve/main/vocab.json",
+        "./will-dalle-files/mega/vocab.json",
     ),
     (
-        "https://huggingface.co/kuprel/min-dalle/resolve/main/merges_mini.json",
-        "./will-dalle-files/mini/merges.txt",
+        "https://huggingface.co/kuprel/min-dalle/resolve/main/merges.json",
+        "./will-dalle-files/mega/merges.txt",
     ),
     (
         "https://huggingface.co/kuprel/min-dalle/resolve/main/detoker.pt",
@@ -39,26 +39,26 @@ for file in required_files:
         download_file(file[0], file[1])
 
 model_kwargs = {
-    "depth": 12,
-    "num_attention_heads": 16,
-    "embedding_dim": 1024,
-    "glu_embedding_dim": 2730,
-    "text_vocab_len": 50264,
-    "image_vocab_len": 16384,
-    "vocab_path": "./will-dalle-files/mini/vocab.json",
-    "merges_path": "./will-dalle-files/mini/merges.txt",
+    "depth": 24,
+    "num_attention_heads": 32,
+    "embedding_dim": 2048,
+    "glu_embedding_dim": 4096,
+    "text_vocab_len": 50272,
+    "image_vocab_len": 16415,
+    "vocab_path": "./will-dalle-files/mega/vocab.json",
+    "merges_path": "./will-dalle-files/mega/merges.txt",
     "device": 0,
-    "dtype": torch.float16,
+    "dtype": torch.float32,
 }
 
 model = DALLE(model_kwargs).to(model_kwargs["device"])
 
 model.encoder.load_state_dict(
-    torch.load("./will-dalle-files/mini/encoder.pt"), strict=False
+    torch.load("./will-dalle-files/mega/encoder.pt"), strict=False
 )
 
 model.decoder.load_state_dict(
-    torch.load("./will-dalle-files/mini/decoder.pt"), strict=False
+    torch.load("./will-dalle-files/mega/decoder.pt"), strict=False
 )
 
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))

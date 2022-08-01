@@ -1,3 +1,5 @@
+# based on @kuprel's `min-dalle` https://github.com/kuprel/min-dalle
+
 from typing import List
 import torch
 from torch import nn, BoolTensor, FloatTensor, LongTensor
@@ -594,7 +596,7 @@ class DALLE(nn.Module):
 
         self.is_verbose = False
         self.is_mega = False
-        self.dtype = torch.float32
+        self.dtype = args["dtype"]
         self.is_reusable = True
         with open(args["vocab_path"], "r", encoding="utf8") as f:
             vocab = json.load(f)
