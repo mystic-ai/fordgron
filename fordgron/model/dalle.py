@@ -492,7 +492,7 @@ class DalleBartDecoder(nn.Module):
         logits = self.lm_head(decoder_state)
         temperature = settings[[0]]
         top_k = settings[[1]].to(torch.long)
-        supercondition_factor = settings[[2]]
+        supercondition_factor = 2 ** settings[[2]]
         logits = logits[:, -1, : 2**14]
         logits: FloatTensor = (
             logits[:image_count] * (1 - supercondition_factor)
@@ -652,7 +652,7 @@ class DALLE(nn.Module):
         is_seamless: bool = False,
         temperature: float = 1,
         top_k: int = 256,
-        supercondition_factor: int = 16,
+        log2_supercondition_factor: int = 4,
         is_verbose: bool = False,
     ) -> Iterator[FloatTensor]:
         image_count = grid_size**2
@@ -707,7 +707,7 @@ class DALLE(nn.Module):
 
         token_indices = torch.arange(IMAGE_TOKEN_COUNT, device=self.device)
         settings = torch.tensor(
-            [temperature, top_k, supercondition_factor],
+            [temperature, top_k, log2_supercondition_factor],
             dtype=torch.float32,
             device=self.device,
         )
@@ -736,12 +736,17 @@ class DALLE(nn.Module):
         text: str,
         seed: int = -1,
         grid_size: int = 1,
-        log2_supercondition_factor: int = 3,
+        log2_supercondition_factor: int = 4,
         grid: bool = False,
     ) -> Image.Image:
         log2_mid_count = 0
         all_images = []
-        image_stream = self.generate_raw_image_stream(text, seed, grid_size=grid_size)
+        image_stream = self.generate_raw_image_stream(
+            text=text,
+            seed=seed,
+            grid_size=grid_size,
+            log2_supercondition_factor=log2_supercondition_factor,
+        )
         if grid:
             for image in image_stream:
                 return [

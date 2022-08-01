@@ -63,7 +63,13 @@ model.decoder.load_state_dict(
 
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))
 
-images = model(text="horses running on a beach", seed=-1, grid_size=3, grid=False)
+images = model(
+    text="horses running on a beach",
+    seed=-1,
+    grid_size=3,
+    grid=True,
+    log2_supercondition_factor=8,
+)
 
 for idx, one in enumerate(images):
     one.save(f"test{idx}.png")
