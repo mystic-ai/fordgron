@@ -2,10 +2,8 @@ from fordgron import DALLE
 import torch
 from os.path import exists
 import requests
-from typing import List, Tuple
-from emoji import demojize
-from math import inf
 import json
+from transformers import BartTokenizerFast
 
 required_files = [
     (
@@ -31,45 +29,6 @@ required_files = [
 ]
 
 
-class TextTokenizer:
-    def __init__(self, vocab: dict, merges: List[str]):
-        self.token_from_subword = vocab
-        pairs = [tuple(pair.split()) for pair in merges]
-        self.rank_from_pair = dict(zip(pairs, range(len(pairs))))
-
-    def tokenize(self, text: str) -> List[int]:
-        sep_token = self.token_from_subword["</s>"]
-        cls_token = self.token_from_subword["<s>"]
-        unk_token = self.token_from_subword["<unk>"]
-        text = demojize(text, delimiters=["", ""])
-        text = text.lower().encode("ascii", errors="ignore").decode()
-        tokens = [
-            self.token_from_subword.get(subword, unk_token)
-            for word in text.split(" ")
-            if len(word) > 0
-            for subword in self.get_byte_pair_encoding(word)
-        ]
-        return [cls_token] + tokens + [sep_token]
-
-    def get_byte_pair_encoding(self, word: str) -> List[str]:
-        def get_pair_rank(pair: Tuple[str, str]) -> int:
-            return self.rank_from_pair.get(pair, inf)
-
-        subwords = [chr(ord(" ") + 256)] + list(word)
-        while len(subwords) > 1:
-            pairs = list(zip(subwords[:-1], subwords[1:]))
-            pair_to_merge = min(pairs, key=get_pair_rank)
-            if pair_to_merge not in self.rank_from_pair:
-                break
-            i = pairs.index(pair_to_merge)
-            subwords = (
-                (subwords[:i] if i > 0 else [])
-                + [subwords[i] + subwords[i + 1]]
-                + (subwords[i + 2 :] if i + 2 < len(subwords) else [])
-            )
-        return subwords
-
-
 def download_file(url: str, save_path: str):
     print(f"downloading {url}")
     download = requests.get(url)
@@ -93,15 +52,6 @@ model_kwargs = {
     "dtype": torch.float16,
 }
 
-with open("./will-dalle-files/mini/vocab.json", "r", encoding="utf8") as f:
-    vocab = json.load(f)
-with open("./will-dalle-files/mini/merges.txt", "r", encoding="utf8") as f:
-    merges = f.read().split("\n")[1:-1]
-tokenizer = TextTokenizer(
-    vocab,
-    merges,
-)
-
 model = DALLE(model_kwargs).to(model_kwargs["device"])
 
 model.encoder.load_state_dict(
@@ -114,9 +64,17 @@ model.decoder.load_state_dict(
 
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))
 
-text = "blob in a horse house"
+text = "george washington eating battenburg cake anime"
 
-input = tokenizer.tokenize(text)
+tokenizer = BartTokenizerFast(
+    vocab_file="./will-dalle-files/mini/vocab.json",
+    merges_file="./will-dalle-files/mini/merges.txt",
+    sep_token="</s>",
+    cls_token="<s>",
+    unk_token="<unk>",
+)
+
+input = tokenizer.encode(chr(ord(" ")) + text.lower())
 if len(input) > model_kwargs["max_input_text_tokens"]:
     print(
         f"too many input tokens, trucating to the last {model_kwargs['max_input_text_tokens']}"

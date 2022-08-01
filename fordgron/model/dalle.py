@@ -4,6 +4,8 @@ from typing import List
 import torch
 from torch import nn, BoolTensor, FloatTensor, LongTensor
 
+# BART Encoder to get the hidden states from the text prompt
+
 
 class GLU(nn.Module):
     def __init__(self, count_in_out: int, count_middle: int):
@@ -16,21 +18,20 @@ class GLU(nn.Module):
         self.fc2 = nn.Linear(count_middle, count_in_out, bias=False)
 
     def forward(self, z: FloatTensor) -> FloatTensor:
-        z = self.ln0.forward(z)
-        w = self.fc0.forward(z)
-        w = self.gelu.forward(w)
-        v = self.fc1.forward(z)
-        z = self.ln1.forward(w * v)
-        z = self.fc2.forward(z)
+        z = self.ln0(z)
+        w = self.fc0(z)
+        w = self.gelu(w)
+        v = self.fc1(z)
+        z = self.ln1(w * v)
+        z = self.fc2(z)
         return z
 
 
 class AttentionBase(nn.Module):
-    def __init__(self, head_count: int, embedding_dim: int):
+    def __init__(self, num_attention_heads: int, embedding_dim: int):
         super().__init__()
-        self.head_count = head_count
+        self.num_attention_heads = num_attention_heads
         self.embedding_dim = embedding_dim
-
         self.k_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.v_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.q_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
@@ -43,9 +44,9 @@ class AttentionBase(nn.Module):
         queries: FloatTensor,
         attention_mask: BoolTensor,
     ) -> FloatTensor:
-        keys = keys.reshape(keys.shape[:2] + (self.head_count, -1))
-        values = values.reshape(values.shape[:2] + (self.head_count, -1))
-        queries = queries.reshape(queries.shape[:2] + (self.head_count, -1))
+        keys = keys.reshape(keys.shape[:2] + (self.num_attention_heads, -1))
+        values = values.reshape(values.shape[:2] + (self.num_attention_heads, -1))
+        queries = queries.reshape(queries.shape[:2] + (self.num_attention_heads, -1))
         queries /= queries.shape[-1] ** 0.5
 
         attention_bias = (1 - attention_mask.to(torch.float32)) * -1e12
@@ -65,17 +66,19 @@ class EncoderSelfAttention(AttentionBase):
     def forward(
         self, encoder_state: FloatTensor, attention_mask: BoolTensor
     ) -> FloatTensor:
-        keys = self.k_proj.forward(encoder_state)
-        values = self.v_proj.forward(encoder_state)
-        queries = self.q_proj.forward(encoder_state)
+        keys = self.k_proj(encoder_state)
+        values = self.v_proj(encoder_state)
+        queries = self.q_proj(encoder_state)
         return super().forward(keys, values, queries, attention_mask)
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, embedding_dim: int, head_count: int, glu_embedding_dim: int):
+    def __init__(
+        self, embedding_dim: int, num_attention_heads: int, glu_embedding_dim: int
+    ):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = EncoderSelfAttention(head_count, embedding_dim)
+        self.self_attn = EncoderSelfAttention(num_attention_heads, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
 
@@ -83,20 +86,19 @@ class EncoderLayer(nn.Module):
         self, encoder_state: FloatTensor, attention_mask: BoolTensor
     ) -> FloatTensor:
         residual = encoder_state
-        encoder_state = self.pre_self_attn_layer_norm.forward(encoder_state)
-        encoder_state = self.self_attn.forward(encoder_state, attention_mask)
-        encoder_state = self.self_attn_layer_norm.forward(encoder_state)
+        encoder_state = self.pre_self_attn_layer_norm(encoder_state)
+        encoder_state = self.self_attn(encoder_state, attention_mask)
+        encoder_state = self.self_attn_layer_norm(encoder_state)
         encoder_state = residual + encoder_state
         residual = encoder_state
-        encoder_state = self.glu.forward(encoder_state)
-        encoder_state = residual + encoder_state
-        return encoder_state
+        encoder_state = self.glu(encoder_state)
+        return residual + encoder_state  # [2, max_input_text_tokens, embedding_dim]
 
 
 class DalleBartEncoder(nn.Module):
     def __init__(
         self,
-        layer_count: int,
+        depth: int,
         embedding_dim: int,
         num_attention_heads: int,
         text_vocab_len: int,
@@ -108,31 +110,32 @@ class DalleBartEncoder(nn.Module):
         self.text_vocab_len = text_vocab_len
         self.embed_tokens = nn.Embedding(text_vocab_len, embedding_dim)
         self.embed_positions = nn.Embedding(max_input_text_tokens, embedding_dim)
-        self.layers: List[EncoderLayer] = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [
                 EncoderLayer(
                     embedding_dim=embedding_dim,
-                    head_count=num_attention_heads,
+                    num_attention_heads=num_attention_heads,
                     glu_embedding_dim=glu_embedding_dim,
                 )
-                for _ in range(layer_count)
+                for _ in range(depth)
             ]
         )
         self.layernorm_embedding = nn.LayerNorm(embedding_dim)
         self.final_ln = nn.LayerNorm(embedding_dim)
         token_indices = torch.arange(max_input_text_tokens, device=device)
-        self.pose_tokens = torch.stack([token_indices] * 2)
+        self.pose_tokens = torch.stack(
+            [token_indices] * 2
+        )  # [2, max_input_text_tokens]
 
     def forward(self, text_tokens: LongTensor) -> FloatTensor:
-        attention_mask = text_tokens.not_equal(1)
-        encoder_state = self.embed_tokens.forward(
-            text_tokens
-        ) + self.embed_positions.forward(self.pose_tokens)
-        encoder_state = self.layernorm_embedding.forward(encoder_state)
+        attention_mask = text_tokens.not_equal(1)  # False in all 'empty' values
+        encoder_state = self.embed_tokens(text_tokens) + self.embed_positions(
+            self.pose_tokens
+        )  # [2, max_input_text_tokens, embedding_dim]
+        encoder_state = self.layernorm_embedding(encoder_state)
         for layer in self.layers:
-            encoder_state = layer.forward(encoder_state, attention_mask)
-        encoder_state = self.final_ln.forward(encoder_state)
-        return encoder_state
+            encoder_state = layer(encoder_state, attention_mask)
+        return self.final_ln(encoder_state)  # [2, max_input_text_tokens, embedding_dim]
 
 
 import torch
@@ -356,8 +359,8 @@ class DecoderCrossAttention(AttentionBase):
 
 
 class DecoderSelfAttention(AttentionBase):
-    def __init__(self, head_count: int, embedding_dim: int):
-        super().__init__(head_count, embedding_dim)
+    def __init__(self, num_attention_heads: int, embedding_dim: int):
+        super().__init__(num_attention_heads, embedding_dim)
 
     def forward(
         self,
@@ -380,14 +383,18 @@ class DecoderSelfAttention(AttentionBase):
 
 class DecoderLayer(nn.Module):
     def __init__(
-        self, head_count: int, embedding_dim: int, glu_embedding_dim: int, device: str
+        self,
+        num_attention_heads: int,
+        embedding_dim: int,
+        glu_embedding_dim: int,
+        device: str,
     ):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = DecoderSelfAttention(head_count, embedding_dim)
+        self.self_attn = DecoderSelfAttention(num_attention_heads, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.pre_encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.encoder_attn = DecoderCrossAttention(head_count, embedding_dim)
+        self.encoder_attn = DecoderCrossAttention(num_attention_heads, embedding_dim)
         self.encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
         self.token_indices = torch.arange(IMAGE_TOKEN_COUNT, device=device)
@@ -440,11 +447,11 @@ class DalleBartDecoder(nn.Module):
         embedding_dim: int,
         num_attention_heads: int,
         glu_embedding_dim: int,
-        layer_count: int,
+        depth: int,
         device: str,
     ):
         super().__init__()
-        self.layer_count = layer_count
+        self.depth = depth
         self.embedding_dim = embedding_dim
         self.image_vocab_len = image_vocab_len
         self.embed_tokens = nn.Embedding(image_vocab_len + 1, embedding_dim)
@@ -452,12 +459,12 @@ class DalleBartDecoder(nn.Module):
         self.layers: List[DecoderLayer] = nn.ModuleList(
             [
                 DecoderLayer(
-                    head_count=num_attention_heads,
+                    num_attention_heads=num_attention_heads,
                     embedding_dim=embedding_dim,
                     glu_embedding_dim=glu_embedding_dim,
                     device=device,
                 )
-                for _ in range(layer_count)
+                for _ in range(depth)
             ]
         )
         self.layernorm_embedding = nn.LayerNorm(embedding_dim)
@@ -482,7 +489,7 @@ class DalleBartDecoder(nn.Module):
         decoder_state += self.embed_positions.forward(token_index_batched)
         decoder_state = self.layernorm_embedding.forward(decoder_state)
         decoder_state = decoder_state[:, None]
-        for i in range(self.layer_count):
+        for i in range(self.depth):
             decoder_state, attention_state[i] = self.layers[i].forward(
                 decoder_state,
                 encoder_state,
@@ -533,24 +540,20 @@ class DALLE(nn.Module):
     def __init__(
         self,
         args,
-        is_reusable: bool = True,
     ):
         super().__init__()
         if args["device"] == None:
             args["device"] = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = args["device"]
         self.max_input_text_tokens = args["max_input_text_tokens"]
-        self.layer_count = args["depth"]
+        self.depth = args["depth"]
         self.num_attention_heads = args["num_attention_heads"]
         self.embedding_dim = args["embedding_dim"]
         self.glu_embedding_dim = args["glu_embedding_dim"]
         self.text_vocab_len = args["text_vocab_len"]
         self.image_vocab_len = args["image_vocab_len"]
-
         self.is_verbose = False
-        self.is_mega = False
         self.dtype = args["dtype"]
-        self.is_reusable = True
         self.encoder = (
             DalleBartEncoder(
                 num_attention_heads=self.num_attention_heads,
@@ -558,7 +561,7 @@ class DALLE(nn.Module):
                 glu_embedding_dim=self.glu_embedding_dim,
                 max_input_text_tokens=self.max_input_text_tokens,
                 text_vocab_len=self.text_vocab_len,
-                layer_count=self.layer_count,
+                depth=self.depth,
                 device=self.device,
             )
             .to(self.dtype)
@@ -570,7 +573,7 @@ class DALLE(nn.Module):
                 num_attention_heads=self.num_attention_heads,
                 embedding_dim=self.embedding_dim,
                 glu_embedding_dim=self.glu_embedding_dim,
-                layer_count=self.layer_count,
+                depth=self.depth,
                 device=self.device,
             )
             .to(self.dtype)
@@ -581,16 +584,10 @@ class DALLE(nn.Module):
     def image_grid_from_tokens(
         self, image_tokens: LongTensor, is_seamless: bool, is_verbose: bool = False
     ) -> FloatTensor:
-        if not self.is_reusable:
-            del self.decoder
         torch.cuda.empty_cache()
-        if not self.is_reusable:
-            self.init_detokenizer()
         if is_verbose:
             print("detokenizing image")
         images = self.detokenizer.forward(is_seamless, image_tokens)  # [768, 768, 3]
-        if not self.is_reusable:
-            del self.detokenizer
         return images
 
     def generate_raw_image_stream(
@@ -606,21 +603,19 @@ class DALLE(nn.Module):
         is_verbose: bool = False,
     ) -> Iterator[FloatTensor]:
         image_count = grid_size**2
-        if is_verbose:
-            print("tokenizing text")
         text_tokens = numpy.ones((2, 64), dtype=numpy.int32)
-        text_tokens[0, :2] = [input[0], input[-1]]
-        text_tokens[1, : len(input)] = input
+        text_tokens[0, :2] = [
+            input[0],
+            input[-1],
+        ]  # put BOS 0 and EOS 2 in first two positions of array1
+        text_tokens[
+            1, : len(input)
+        ] = input  # put input sequence in first positions of array2
         text_tokens = torch.tensor(text_tokens, dtype=torch.long, device=self.device)
 
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            encoder_state = self.encoder.forward(text_tokens)  # [2, 64, 1024]
-        if not self.is_reusable:
-            del self.encoder
+            encoder_state = self.encoder(text_tokens)  # [x, 64, 1024]
         torch.cuda.empty_cache()
-
-        if not self.is_reusable:
-            self.init_decoder()
 
         with torch.cuda.amp.autocast(dtype=self.dtype):
             expanded_indices = [0] * image_count + [1] * image_count
@@ -629,7 +624,7 @@ class DALLE(nn.Module):
             attention_mask = text_tokens.not_equal(1)
             attention_state = torch.zeros(
                 size=(
-                    self.layer_count,
+                    self.depth,
                     image_count * 4,
                     IMAGE_TOKEN_COUNT,
                     self.embedding_dim,
