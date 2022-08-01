@@ -100,14 +100,14 @@ class DalleBartEncoder(nn.Module):
         embedding_dim: int,
         num_attention_heads: int,
         text_vocab_len: int,
-        text_token_count: int,
+        max_input_text_tokens: int,
         glu_embedding_dim: int,
         device: str,
     ):
         super().__init__()
         self.text_vocab_len = text_vocab_len
         self.embed_tokens = nn.Embedding(text_vocab_len, embedding_dim)
-        self.embed_positions = nn.Embedding(text_token_count, embedding_dim)
+        self.embed_positions = nn.Embedding(max_input_text_tokens, embedding_dim)
         self.layers: List[EncoderLayer] = nn.ModuleList(
             [
                 EncoderLayer(
@@ -120,7 +120,7 @@ class DalleBartEncoder(nn.Module):
         )
         self.layernorm_embedding = nn.LayerNorm(embedding_dim)
         self.final_ln = nn.LayerNorm(embedding_dim)
-        token_indices = torch.arange(text_token_count, device=device)
+        token_indices = torch.arange(max_input_text_tokens, device=device)
         self.pose_tokens = torch.stack([token_indices] * 2)
 
     def forward(self, text_tokens: LongTensor) -> FloatTensor:
@@ -510,53 +510,6 @@ class DalleBartDecoder(nn.Module):
         return image_tokens, attention_state
 
 
-from math import inf
-from typing import List, Tuple
-from emoji import demojize
-
-
-class TextTokenizer:
-    def __init__(self, vocab: dict, merges: List[str]):
-        self.token_from_subword = vocab
-        pairs = [tuple(pair.split()) for pair in merges]
-        self.rank_from_pair = dict(zip(pairs, range(len(pairs))))
-
-    def tokenize(self, text: str, is_verbose: bool = False) -> List[int]:
-        sep_token = self.token_from_subword["</s>"]
-        cls_token = self.token_from_subword["<s>"]
-        unk_token = self.token_from_subword["<unk>"]
-        text = demojize(text, delimiters=["", ""])
-        text = text.lower().encode("ascii", errors="ignore").decode()
-        tokens = [
-            self.token_from_subword.get(subword, unk_token)
-            for word in text.split(" ")
-            if len(word) > 0
-            for subword in self.get_byte_pair_encoding(word, is_verbose)
-        ]
-        return [cls_token] + tokens + [sep_token]
-
-    def get_byte_pair_encoding(self, word: str, is_verbose: bool) -> List[str]:
-        def get_pair_rank(pair: Tuple[str, str]) -> int:
-            return self.rank_from_pair.get(pair, inf)
-
-        subwords = [chr(ord(" ") + 256)] + list(word)
-        while len(subwords) > 1:
-            pairs = list(zip(subwords[:-1], subwords[1:]))
-            pair_to_merge = min(pairs, key=get_pair_rank)
-            if pair_to_merge not in self.rank_from_pair:
-                break
-            i = pairs.index(pair_to_merge)
-            subwords = (
-                (subwords[:i] if i > 0 else [])
-                + [subwords[i] + subwords[i + 1]]
-                + (subwords[i + 2 :] if i + 2 < len(subwords) else [])
-            )
-
-        if is_verbose:
-            print(subwords)
-        return subwords
-
-
 import os
 from PIL import Image
 import numpy
@@ -586,7 +539,7 @@ class DALLE(nn.Module):
         if args["device"] == None:
             args["device"] = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = args["device"]
-        self.text_token_count = 64
+        self.max_input_text_tokens = args["max_input_text_tokens"]
         self.layer_count = args["depth"]
         self.num_attention_heads = args["num_attention_heads"]
         self.embedding_dim = args["embedding_dim"]
@@ -598,17 +551,12 @@ class DALLE(nn.Module):
         self.is_mega = False
         self.dtype = args["dtype"]
         self.is_reusable = True
-        with open(args["vocab_path"], "r", encoding="utf8") as f:
-            vocab = json.load(f)
-        with open(args["merges_path"], "r", encoding="utf8") as f:
-            merges = f.read().split("\n")[1:-1]
-        self.tokenizer = TextTokenizer(vocab, merges)
         self.encoder = (
             DalleBartEncoder(
                 num_attention_heads=self.num_attention_heads,
                 embedding_dim=self.embedding_dim,
                 glu_embedding_dim=self.glu_embedding_dim,
-                text_token_count=self.text_token_count,
+                max_input_text_tokens=self.max_input_text_tokens,
                 text_vocab_len=self.text_vocab_len,
                 layer_count=self.layer_count,
                 device=self.device,
@@ -647,7 +595,7 @@ class DALLE(nn.Module):
 
     def generate_raw_image_stream(
         self,
-        text: str,
+        input: str,
         seed: int,
         grid_size: int,
         progressive_outputs: bool = False,
@@ -660,20 +608,11 @@ class DALLE(nn.Module):
         image_count = grid_size**2
         if is_verbose:
             print("tokenizing text")
-        tokens = self.tokenizer.tokenize(text, is_verbose=is_verbose)
-        if len(tokens) > self.text_token_count:
-            tokens = tokens[: self.text_token_count]
-        if is_verbose:
-            print("{} text tokens".format(len(tokens)), tokens)
         text_tokens = numpy.ones((2, 64), dtype=numpy.int32)
-        text_tokens[0, :2] = [tokens[0], tokens[-1]]
-        text_tokens[1, : len(tokens)] = tokens
+        text_tokens[0, :2] = [input[0], input[-1]]
+        text_tokens[1, : len(input)] = input
         text_tokens = torch.tensor(text_tokens, dtype=torch.long, device=self.device)
 
-        if not self.is_reusable:
-            self.init_encoder()
-        if is_verbose:
-            print("encoding text tokens")
         with torch.cuda.amp.autocast(dtype=self.dtype):
             encoder_state = self.encoder.forward(text_tokens)  # [2, 64, 1024]
         if not self.is_reusable:
@@ -735,7 +674,7 @@ class DALLE(nn.Module):
 
     def forward(
         self,
-        text: str,
+        input: List[int],
         seed: int = -1,
         grid_size: int = 1,
         log2_supercondition_factor: int = 4,
@@ -745,7 +684,7 @@ class DALLE(nn.Module):
     ) -> Image.Image:
         all_images = []
         image_stream = self.generate_raw_image_stream(
-            text=text,
+            input,
             seed=seed,
             grid_size=grid_size,
             log2_supercondition_factor=log2_supercondition_factor,
