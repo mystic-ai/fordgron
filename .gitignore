@@ -143,3 +143,4 @@ poetry.lock
 
 will-dalle-files
 gpt_j.py
+pretrained

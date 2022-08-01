@@ -1,11 +1,10 @@
 from typing import List
 import torch
 from torch import nn, BoolTensor, FloatTensor, LongTensor
-torch.set_grad_enabled(False)
 
 
 class GLU(nn.Module):
-    def __init__(self, count_in_out, count_middle):
+    def __init__(self, count_in_out: int, count_middle: int):
         super().__init__()
         self.gelu = nn.GELU()
         self.ln0 = nn.LayerNorm(count_in_out)
@@ -13,7 +12,7 @@ class GLU(nn.Module):
         self.fc0 = nn.Linear(count_in_out, count_middle, bias=False)
         self.fc1 = nn.Linear(count_in_out, count_middle, bias=False)
         self.fc2 = nn.Linear(count_middle, count_in_out, bias=False)
-    
+
     def forward(self, z: FloatTensor) -> FloatTensor:
         z = self.ln0.forward(z)
         w = self.fc0.forward(z)
@@ -25,46 +24,34 @@ class GLU(nn.Module):
 
 
 class AttentionBase(nn.Module):
-    def __init__(self, num_attention_heads: int, embedding_dim: int):
+    def __init__(self, head_count: int, embedding_dim: int):
         super().__init__()
-        self.num_attention_heads = num_attention_heads
+        self.head_count = head_count
         self.embedding_dim = embedding_dim
 
         self.k_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.v_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.q_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.out_proj = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.one = torch.ones((1, 1))
-        if torch.cuda.is_available(): self.one = self.one.cuda()
-    
+
     def forward(
         self,
         keys: FloatTensor,
         values: FloatTensor,
         queries: FloatTensor,
-        attention_mask: BoolTensor
+        attention_mask: BoolTensor,
     ) -> FloatTensor:
-        keys = keys.reshape(keys.shape[:2] + (self.num_attention_heads, -1))
-        values = values.reshape(values.shape[:2] + (self.num_attention_heads, -1))
-        queries = queries.reshape(queries.shape[:2] + (self.num_attention_heads, -1))
+        keys = keys.reshape(keys.shape[:2] + (self.head_count, -1))
+        values = values.reshape(values.shape[:2] + (self.head_count, -1))
+        queries = queries.reshape(queries.shape[:2] + (self.head_count, -1))
         queries /= queries.shape[-1] ** 0.5
 
-        attention_bias = torch.where(
-            attention_mask,
-            self.one * 0,
-            self.one * (-torch.inf),
-        )
-        attention_weights: FloatTensor = torch.einsum(
-            'bqhc,bkhc->bhqk',
-            queries, 
-            keys
-        )
+        attention_bias = (1 - attention_mask.to(torch.float32)) * -1e12
+        attention_weights: FloatTensor = torch.einsum("bqhc,bkhc->bhqk", queries, keys)
         attention_weights += attention_bias[:, None, None, :]
         attention_weights = torch.softmax(attention_weights, -1)
         attention_output: FloatTensor = torch.einsum(
-            "bhqk,bkhc->bqhc",
-            attention_weights, 
-            values
+            "bhqk,bkhc->bqhc", attention_weights, values
         )
         shape = attention_output.shape[:2] + (self.embedding_dim,)
         attention_output = attention_output.reshape(shape)
@@ -74,9 +61,7 @@ class AttentionBase(nn.Module):
 
 class EncoderSelfAttention(AttentionBase):
     def forward(
-        self,
-        encoder_state: FloatTensor,
-        attention_mask: BoolTensor
+        self, encoder_state: FloatTensor, attention_mask: BoolTensor
     ) -> FloatTensor:
         keys = self.k_proj.forward(encoder_state)
         values = self.v_proj.forward(encoder_state)
@@ -85,17 +70,15 @@ class EncoderSelfAttention(AttentionBase):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, embedding_dim: int, num_attention_heads: int, glu_embedding_dim: int):
+    def __init__(self, embedding_dim: int, head_count: int, glu_embedding_dim: int):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = EncoderSelfAttention(num_attention_heads, embedding_dim)
+        self.self_attn = EncoderSelfAttention(head_count, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
-    
+
     def forward(
-        self,
-        encoder_state: FloatTensor,
-        attention_mask: BoolTensor
+        self, encoder_state: FloatTensor, attention_mask: BoolTensor
     ) -> FloatTensor:
         residual = encoder_state
         encoder_state = self.pre_self_attn_layer_norm.forward(encoder_state)
@@ -111,37 +94,38 @@ class EncoderLayer(nn.Module):
 class DalleBartEncoder(nn.Module):
     def __init__(
         self,
-        depth: int,
+        layer_count: int,
         embedding_dim: int,
         num_attention_heads: int,
         text_vocab_len: int,
         text_token_count: int,
-        glu_embedding_dim: int
+        glu_embedding_dim: int,
+        device: str,
     ):
         super().__init__()
+        self.text_vocab_len = text_vocab_len
         self.embed_tokens = nn.Embedding(text_vocab_len, embedding_dim)
         self.embed_positions = nn.Embedding(text_token_count, embedding_dim)
-        self.layers: List[EncoderLayer] = nn.ModuleList([
-            EncoderLayer(
-                embedding_dim = embedding_dim,
-                num_attention_heads = num_attention_heads,
-                glu_embedding_dim = glu_embedding_dim
-            ) 
-            for _ in range(depth)
-        ])
+        self.layers: List[EncoderLayer] = nn.ModuleList(
+            [
+                EncoderLayer(
+                    embedding_dim=embedding_dim,
+                    head_count=num_attention_heads,
+                    glu_embedding_dim=glu_embedding_dim,
+                )
+                for _ in range(layer_count)
+            ]
+        )
         self.layernorm_embedding = nn.LayerNorm(embedding_dim)
         self.final_ln = nn.LayerNorm(embedding_dim)
-        self.token_indices = torch.arange(text_token_count).to(torch.long)
-        if torch.cuda.is_available(): 
-            self.token_indices = self.token_indices.cuda()
+        token_indices = torch.arange(text_token_count, device=device)
+        self.pose_tokens = torch.stack([token_indices] * 2)
 
     def forward(self, text_tokens: LongTensor) -> FloatTensor:
         attention_mask = text_tokens.not_equal(1)
-        pose_tokens = self.token_indices[None][[0] * text_tokens.shape[0]]
-        encoder_state = (
-            self.embed_tokens.forward(text_tokens) +
-            self.embed_positions.forward(pose_tokens)
-        )
+        encoder_state = self.embed_tokens.forward(
+            text_tokens
+        ) + self.embed_positions.forward(self.pose_tokens)
         encoder_state = self.layernorm_embedding.forward(encoder_state)
         for layer in self.layers:
             encoder_state = layer.forward(encoder_state, attention_mask)
@@ -149,53 +133,211 @@ class DalleBartEncoder(nn.Module):
         return encoder_state
 
 
-from math import inf
-from typing import List, Tuple
+import torch
+from torch import nn
+from torch import FloatTensor, LongTensor
+from math import sqrt
 
-class TextTokenizer:
-    def __init__(self, vocab: dict, merges: List[str]):
-        self.token_from_subword = vocab
-        pairs = [tuple(pair.split()) for pair in merges]
-        self.rank_from_pair = dict(zip(pairs, range(len(pairs))))
 
-    def tokenize(self, text: str, is_verbose: bool = False) -> List[int]:
-        sep_token = self.token_from_subword['</s>']
-        cls_token = self.token_from_subword['<s>']
-        unk_token = self.token_from_subword['<unk>']
-        text = text.lower().encode("ascii", errors="ignore").decode()
-        tokens = [
-            self.token_from_subword.get(subword, unk_token)
-            for word in text.split(" ") if len(word) > 0
-            for subword in self.get_byte_pair_encoding(word, is_verbose)
-        ]
-        return [cls_token] + tokens + [sep_token]
+class ResnetBlock(nn.Module):
+    def __init__(self, log2_count_in: int, log2_count_out: int):
+        super().__init__()
+        m, n = 2**log2_count_in, 2**log2_count_out
+        self.is_middle = m == n
+        self.norm1 = nn.GroupNorm(2**5, m)
+        self.conv1 = nn.Conv2d(m, n, 3, padding=1)
+        self.norm2 = nn.GroupNorm(2**5, n)
+        self.conv2 = nn.Conv2d(n, n, 3, padding=1)
+        if not self.is_middle:
+            self.nin_shortcut = nn.Conv2d(m, n, 1)
 
-    def get_byte_pair_encoding(self, word: str, is_verbose: bool) -> List[str]:
-        def get_pair_rank(pair: Tuple[str, str]) -> int:
-            return self.rank_from_pair.get(pair, inf)
+    def forward(self, x: FloatTensor) -> FloatTensor:
+        h = x
+        h = self.norm1.forward(h)
+        h *= torch.sigmoid(h)
+        h = self.conv1.forward(h)
+        h = self.norm2.forward(h)
+        h *= torch.sigmoid(h)
+        h = self.conv2(h)
+        if not self.is_middle:
+            x = self.nin_shortcut.forward(x)
+        return x + h
 
-        subwords = [chr(ord(" ") + 256)] + list(word)
-        while len(subwords) > 1:
-            pairs = list(zip(subwords[:-1], subwords[1:]))
-            pair_to_merge = min(pairs, key=get_pair_rank)
-            if pair_to_merge not in self.rank_from_pair: break
-            i = pairs.index(pair_to_merge)
-            subwords = (
-                (subwords[:i] if i > 0 else []) + 
-                [subwords[i] + subwords[i + 1]] + 
-                (subwords[i + 2:] if i + 2 < len(subwords) else [])
+
+class AttentionBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        n = 2**9
+        self.norm = nn.GroupNorm(2**5, n)
+        self.q = nn.Conv2d(n, n, 1)
+        self.k = nn.Conv2d(n, n, 1)
+        self.v = nn.Conv2d(n, n, 1)
+        self.proj_out = nn.Conv2d(n, n, 1)
+
+    def forward(self, x: FloatTensor) -> FloatTensor:
+        n, m = 2**9, x.shape[0]
+        h = x
+        h = self.norm(h)
+        k = self.k.forward(h)
+        v = self.v.forward(h)
+        q = self.q.forward(h)
+        k = k.reshape(m, n, -1)
+        v = v.reshape(m, n, -1)
+        q = q.reshape(m, n, -1)
+        q = q.permute(0, 2, 1)
+        w = torch.bmm(q, k)
+        w /= n**0.5
+        w = torch.softmax(w, dim=2)
+        w = w.permute(0, 2, 1)
+        h = torch.bmm(v, w)
+        token_count = int(sqrt(h.shape[-1]))
+        h = h.reshape(m, n, token_count, token_count)
+        h = self.proj_out.forward(h)
+        return x + h
+
+
+class MiddleLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block_1 = ResnetBlock(9, 9)
+        self.attn_1 = AttentionBlock()
+        self.block_2 = ResnetBlock(9, 9)
+
+    def forward(self, h: FloatTensor) -> FloatTensor:
+        h = self.block_1.forward(h)
+        h = self.attn_1.forward(h)
+        h = self.block_2.forward(h)
+        return h
+
+
+class Upsample(nn.Module):
+    def __init__(self, log2_count):
+        super().__init__()
+        n = 2**log2_count
+        self.upsample = torch.nn.UpsamplingNearest2d(scale_factor=2)
+        self.conv = nn.Conv2d(n, n, 3, padding=1)
+
+    def forward(self, x: FloatTensor) -> FloatTensor:
+        x = self.upsample.forward(x.to(torch.float32))
+        x = self.conv.forward(x)
+        return x
+
+
+class UpsampleBlock(nn.Module):
+    def __init__(
+        self,
+        log2_count_in: int,
+        log2_count_out: int,
+        has_attention: bool,
+        has_upsample: bool,
+    ):
+        super().__init__()
+        self.has_attention = has_attention
+        self.has_upsample = has_upsample
+
+        self.block = nn.ModuleList(
+            [
+                ResnetBlock(log2_count_in, log2_count_out),
+                ResnetBlock(log2_count_out, log2_count_out),
+                ResnetBlock(log2_count_out, log2_count_out),
+            ]
+        )
+
+        if has_attention:
+            self.attn = nn.ModuleList(
+                [AttentionBlock(), AttentionBlock(), AttentionBlock()]
             )
 
-        if is_verbose: print(subwords)
-        return subwords
+        if has_upsample:
+            self.upsample = Upsample(log2_count_out)
+
+    def forward(self, h: FloatTensor) -> FloatTensor:
+        for j in range(3):
+            h = self.block[j].forward(h)
+            if self.has_attention:
+                h = self.attn[j].forward(h)
+        if self.has_upsample:
+            h = self.upsample.forward(h)
+        return h
+
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.conv_in = nn.Conv2d(2**8, 2**9, 3, padding=1)
+        self.mid = MiddleLayer()
+
+        self.up = nn.ModuleList(
+            [
+                UpsampleBlock(7, 7, False, False),
+                UpsampleBlock(8, 7, False, True),
+                UpsampleBlock(8, 8, False, True),
+                UpsampleBlock(9, 8, False, True),
+                UpsampleBlock(9, 9, True, True),
+            ]
+        )
+
+        self.norm_out = nn.GroupNorm(2**5, 2**7)
+        self.conv_out = nn.Conv2d(2**7, 3, 3, padding=1)
+
+    def forward(self, z: FloatTensor) -> FloatTensor:
+        z = self.conv_in.forward(z)
+        z = self.mid.forward(z)
+
+        for i in reversed(range(5)):
+            z = self.up[i].forward(z)
+
+        z = self.norm_out.forward(z)
+        z *= torch.sigmoid(z)
+        z = self.conv_out.forward(z)
+        return z
+
+
+class VQGanDetokenizer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vocab_count, embedding_dim = 2**14, 2**8
+        self.vocab_count = vocab_count
+        self.embedding = nn.Embedding(vocab_count, embedding_dim)
+        self.post_quant_conv = nn.Conv2d(embedding_dim, embedding_dim, 1)
+        self.decoder = Decoder()
+
+    def forward(self, is_seamless: bool, z: LongTensor) -> FloatTensor:
+        z.clamp_(0, self.vocab_count - 1)
+        grid_size = int(sqrt(z.shape[0]))
+        token_count = grid_size * 2**4
+
+        if is_seamless:
+            z = z.view([grid_size, grid_size, 2**4, 2**4])
+            z = z.flatten(1, 2).transpose(1, 0).flatten(1, 2)
+            z = z.flatten().unsqueeze(1)
+            z = self.embedding.forward(z)
+            z = z.view((1, token_count, token_count, 2**8))
+        else:
+            z = self.embedding.forward(z)
+            z = z.view((z.shape[0], 2**4, 2**4, 2**8))
+
+        z = z.permute(0, 3, 1, 2).contiguous()
+        z = self.post_quant_conv.forward(z)
+        z = self.decoder.forward(z)
+        z = z.permute(0, 2, 3, 1)
+        z = z.clip(0.0, 1.0) * 255
+
+        if is_seamless:
+            z = z[0]
+        else:
+            z = z.view([grid_size, grid_size, 2**8, 2**8, 3])
+            z = z.flatten(1, 2).transpose(1, 0).flatten(1, 2)
+
+        return z
+
 
 from typing import Tuple, List
 import torch
-from torch import LongTensor, nn, FloatTensor, BoolTensor
-torch.set_grad_enabled(False)
+from torch import nn, LongTensor, FloatTensor, BoolTensor
 
 IMAGE_TOKEN_COUNT = 256
-BLANK_TOKEN = 6965
 
 
 class DecoderCrossAttention(AttentionBase):
@@ -203,7 +345,7 @@ class DecoderCrossAttention(AttentionBase):
         self,
         decoder_state: FloatTensor,
         encoder_state: FloatTensor,
-        attention_mask: BoolTensor
+        attention_mask: BoolTensor,
     ) -> FloatTensor:
         keys = self.k_proj.forward(encoder_state)
         values = self.v_proj.forward(encoder_state)
@@ -212,23 +354,19 @@ class DecoderCrossAttention(AttentionBase):
 
 
 class DecoderSelfAttention(AttentionBase):
-    def __init__(self, num_attention_heads: int, embedding_dim: int):
-        super().__init__(num_attention_heads, embedding_dim)
-        token_indices = torch.arange(IMAGE_TOKEN_COUNT)
-        if torch.cuda.is_available(): token_indices = token_indices.cuda()
-        self.token_indices = token_indices
+    def __init__(self, head_count: int, embedding_dim: int):
+        super().__init__(head_count, embedding_dim)
 
     def forward(
-        self, 
+        self,
         decoder_state: FloatTensor,
         attention_state: FloatTensor,
-        token_index: LongTensor
+        attn_mask: BoolTensor,
+        token_index: LongTensor,
     ) -> Tuple[FloatTensor, FloatTensor]:
         keys = self.k_proj.forward(decoder_state)
         values = self.v_proj.forward(decoder_state)
         queries = self.q_proj.forward(decoder_state)
-        attn_mask = self.token_indices < token_index + 1
-        attn_mask = attn_mask[None][[0] * decoder_state.shape[0]]
         attn_state_new = torch.cat([keys, values]).to(attention_state.dtype)
         attention_state[:, token_index] = attn_state_new
         batch_count = decoder_state.shape[0]
@@ -240,20 +378,17 @@ class DecoderSelfAttention(AttentionBase):
 
 class DecoderLayer(nn.Module):
     def __init__(
-        self, 
-        num_attention_heads: int, 
-        embedding_dim: int,
-        glu_embedding_dim: int
+        self, head_count: int, embedding_dim: int, glu_embedding_dim: int, device: str
     ):
         super().__init__()
         self.pre_self_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.self_attn = DecoderSelfAttention(num_attention_heads, embedding_dim)
+        self.self_attn = DecoderSelfAttention(head_count, embedding_dim)
         self.self_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.pre_encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
-        self.encoder_attn = DecoderCrossAttention(num_attention_heads, embedding_dim)
+        self.encoder_attn = DecoderCrossAttention(head_count, embedding_dim)
         self.encoder_attn_layer_norm = nn.LayerNorm(embedding_dim)
         self.glu = GLU(embedding_dim, glu_embedding_dim)
-
+        self.token_indices = torch.arange(IMAGE_TOKEN_COUNT, device=device)
 
     def forward(
         self,
@@ -261,15 +396,18 @@ class DecoderLayer(nn.Module):
         encoder_state: FloatTensor,
         attention_state: FloatTensor,
         attention_mask: BoolTensor,
-        token_index: LongTensor
+        token_index: LongTensor,
     ) -> Tuple[FloatTensor, FloatTensor]:
         # Self Attention
+        self_attn_mask = self.token_indices < token_index + 1
+        self_attn_mask = self_attn_mask[None][[0] * decoder_state.shape[0]]
         residual = decoder_state
         decoder_state = self.pre_self_attn_layer_norm.forward(decoder_state)
         decoder_state, attention_state = self.self_attn.forward(
-            decoder_state,
-            attention_state,
-            token_index
+            decoder_state=decoder_state,
+            attention_state=attention_state,
+            attn_mask=self_attn_mask,
+            token_index=token_index,
         )
         decoder_state = self.self_attn_layer_norm.forward(decoder_state)
         decoder_state = residual + decoder_state
@@ -278,9 +416,9 @@ class DecoderLayer(nn.Module):
         residual = decoder_state
         decoder_state = self.pre_encoder_attn_layer_norm.forward(decoder_state)
         decoder_state = self.encoder_attn.forward(
-            decoder_state,
-            encoder_state,
-            attention_mask
+            decoder_state=decoder_state,
+            encoder_state=encoder_state,
+            attention_mask=attention_mask,
         )
         decoder_state = self.encoder_attn_layer_norm.forward(decoder_state)
         decoder_state = residual + decoder_state
@@ -300,323 +438,141 @@ class DalleBartDecoder(nn.Module):
         embedding_dim: int,
         num_attention_heads: int,
         glu_embedding_dim: int,
-        depth: int,
-        start_token: int
+        layer_count: int,
+        device: str,
     ):
         super().__init__()
-        self.depth = depth
+        self.layer_count = layer_count
         self.embedding_dim = embedding_dim
+        self.image_vocab_len = image_vocab_len
         self.embed_tokens = nn.Embedding(image_vocab_len + 1, embedding_dim)
         self.embed_positions = nn.Embedding(IMAGE_TOKEN_COUNT, embedding_dim)
-        self.layers: List[DecoderLayer] = nn.ModuleList([
-            DecoderLayer(
-                num_attention_heads,
-                embedding_dim,
-                glu_embedding_dim
-            ) 
-            for _ in range(depth)
-        ])
+        self.layers: List[DecoderLayer] = nn.ModuleList(
+            [
+                DecoderLayer(
+                    head_count=num_attention_heads,
+                    embedding_dim=embedding_dim,
+                    glu_embedding_dim=glu_embedding_dim,
+                    device=device,
+                )
+                for _ in range(layer_count)
+            ]
+        )
         self.layernorm_embedding = nn.LayerNorm(embedding_dim)
         self.final_ln = nn.LayerNorm(embedding_dim)
         self.lm_head = nn.Linear(embedding_dim, image_vocab_len + 1, bias=False)
-        self.zero_prob = torch.zeros([1])
-        self.token_indices = torch.arange(IMAGE_TOKEN_COUNT)
-        self.start_token = torch.tensor([start_token]).to(torch.long)
-        if torch.cuda.is_available():
-            self.zero_prob = self.zero_prob.cuda()
-            self.token_indices = self.token_indices.cuda()
-            self.start_token = self.start_token.cuda()
+        self.token_indices = torch.arange(IMAGE_TOKEN_COUNT, device=device)
 
-
-    def decode_step(
+    def forward(
         self,
-        log2_k: int,
-        log2_supercondition_factor: int,
+        settings: FloatTensor,
         attention_mask: BoolTensor,
         encoder_state: FloatTensor,
         attention_state: FloatTensor,
         prev_tokens: LongTensor,
-        token_index: LongTensor
-    ) -> Tuple[FloatTensor, FloatTensor]:
+        token_index: LongTensor,
+    ) -> Tuple[LongTensor, FloatTensor]:
         image_count = encoder_state.shape[0] // 2
         token_index_batched = token_index[[0] * image_count * 2]
         prev_tokens = prev_tokens[list(range(image_count)) * 2]
+        prev_tokens.clamp_(0, self.image_vocab_len)
         decoder_state = self.embed_tokens.forward(prev_tokens)
         decoder_state += self.embed_positions.forward(token_index_batched)
         decoder_state = self.layernorm_embedding.forward(decoder_state)
         decoder_state = decoder_state[:, None]
-        for i in range(self.depth):
+        for i in range(self.layer_count):
             decoder_state, attention_state[i] = self.layers[i].forward(
                 decoder_state,
                 encoder_state,
                 attention_state[i],
                 attention_mask,
-                token_index
+                token_index,
             )
         decoder_state = self.final_ln(decoder_state)
         logits = self.lm_head(decoder_state)
-        a = 2 ** log2_supercondition_factor
+        temperature = settings[[0]]
+        top_k = settings[[1]].to(torch.long)
+        supercondition_factor = settings[[2]]
+        logits = logits[:, -1, : 2**14]
         logits: FloatTensor = (
-            logits[:image_count, -1] * (1 - a) + 
-            logits[image_count:, -1] * a
+            logits[:image_count] * (1 - supercondition_factor)
+            + logits[image_count:] * supercondition_factor
         )
+        logits_sorted, _ = logits.sort(descending=True)
+        is_kept = logits >= logits_sorted[:, top_k - 1]
+        logits -= logits_sorted[:, [0]]
+        logits /= temperature
+        logits.exp_()
+        logits *= is_kept.to(torch.float32)
+        image_tokens = torch.multinomial(logits, 1)[:, 0]
+        return image_tokens, attention_state
 
-        top_logits, _ = logits.topk(2 ** log2_k, dim=-1)
-        probs = torch.where(
-            logits < top_logits[:, [-1]],
-            self.zero_prob,
-            torch.exp(logits - top_logits[:, [0]])
-        )
-        return probs, attention_state
+
+from math import inf
+from typing import List, Tuple
+from emoji import demojize
 
 
-    def decode_row(
-        self,
-        row_index: int,
-        log2_k: int,
-        log2_supercondition_factor: int,
-        encoder_state: FloatTensor,
-        attention_mask: BoolTensor,
-        attention_state: FloatTensor,
-        image_tokens_sequence: LongTensor
-    ) -> Tuple[FloatTensor, LongTensor]:
-        for col_index in range(16):
-            i = 16 * row_index + col_index
-            probs, attention_state = self.decode_step(
-                log2_k = log2_k,
-                log2_supercondition_factor = log2_supercondition_factor,
-                attention_mask = attention_mask,
-                encoder_state = encoder_state,
-                attention_state = attention_state,
-                prev_tokens = image_tokens_sequence[:, i],
-                token_index = self.token_indices[[i]]
+class TextTokenizer:
+    def __init__(self, vocab: dict, merges: List[str]):
+        self.token_from_subword = vocab
+        pairs = [tuple(pair.split()) for pair in merges]
+        self.rank_from_pair = dict(zip(pairs, range(len(pairs))))
+
+    def tokenize(self, text: str, is_verbose: bool = False) -> List[int]:
+        sep_token = self.token_from_subword["</s>"]
+        cls_token = self.token_from_subword["<s>"]
+        unk_token = self.token_from_subword["<unk>"]
+        text = demojize(text, delimiters=["", ""])
+        text = text.lower().encode("ascii", errors="ignore").decode()
+        tokens = [
+            self.token_from_subword.get(subword, unk_token)
+            for word in text.split(" ")
+            if len(word) > 0
+            for subword in self.get_byte_pair_encoding(word, is_verbose)
+        ]
+        return [cls_token] + tokens + [sep_token]
+
+    def get_byte_pair_encoding(self, word: str, is_verbose: bool) -> List[str]:
+        def get_pair_rank(pair: Tuple[str, str]) -> int:
+            return self.rank_from_pair.get(pair, inf)
+
+        subwords = [chr(ord(" ") + 256)] + list(word)
+        while len(subwords) > 1:
+            pairs = list(zip(subwords[:-1], subwords[1:]))
+            pair_to_merge = min(pairs, key=get_pair_rank)
+            if pair_to_merge not in self.rank_from_pair:
+                break
+            i = pairs.index(pair_to_merge)
+            subwords = (
+                (subwords[:i] if i > 0 else [])
+                + [subwords[i] + subwords[i + 1]]
+                + (subwords[i + 2 :] if i + 2 < len(subwords) else [])
             )
-            image_tokens_sequence[:, i + 1] = torch.multinomial(probs, 1)[:, 0]
 
-        return attention_state, image_tokens_sequence
+        if is_verbose:
+            print(subwords)
+        return subwords
 
-    
-    def decode_initial(
-        self,
-        seed: int,
-        image_count: int,
-        text_tokens: LongTensor,
-        encoder_state: FloatTensor
-    ) -> Tuple[FloatTensor, FloatTensor, FloatTensor, LongTensor]:
-        expanded_indices = [0] * image_count + [1] * image_count
-        text_tokens = text_tokens[expanded_indices]
-        encoder_state = encoder_state[expanded_indices]
-        attention_mask = text_tokens.not_equal(1)
-
-        attention_state_shape = (
-            self.depth,
-            image_count * 4,
-            IMAGE_TOKEN_COUNT,
-            self.embedding_dim
-        )
-        attention_state = torch.zeros(attention_state_shape)
-        image_tokens_sequence = torch.full(
-            (image_count, IMAGE_TOKEN_COUNT + 1), 
-            BLANK_TOKEN,
-            dtype=torch.long
-        )
-        if torch.cuda.is_available(): 
-            attention_state = attention_state.cuda()
-            image_tokens_sequence = image_tokens_sequence.cuda()
-        
-        image_tokens_sequence[:, 0] = self.start_token[0]
-
-        if seed > 0: torch.manual_seed(seed)
-
-        return encoder_state, attention_mask, attention_state, image_tokens_sequence
-
-import torch
-from torch import Tensor
-from torch.nn import Module, ModuleList, GroupNorm, Conv2d, Embedding
-torch.set_grad_enabled(False)
-
-
-class ResnetBlock(Module):
-    def __init__(self, log2_count_in: int, log2_count_out: int):
-        super().__init__()
-        m, n = 2 ** log2_count_in, 2 ** log2_count_out
-        self.is_middle = m == n
-        self.norm1 = GroupNorm(2 ** 5, m)
-        self.conv1 = Conv2d(m, n, 3, padding=1)
-        self.norm2 = GroupNorm(2 ** 5, n)
-        self.conv2 = Conv2d(n, n, 3, padding=1)
-        if not self.is_middle:
-            self.nin_shortcut = Conv2d(m, n, 1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        h = x
-        h = self.norm1.forward(h)
-        h *= torch.sigmoid(h)
-        h = self.conv1.forward(h)
-        h = self.norm2.forward(h)
-        h *= torch.sigmoid(h)
-        h = self.conv2(h)
-        if not self.is_middle:
-            x = self.nin_shortcut.forward(x)
-        return x + h
-
-
-class AttentionBlock(Module):
-    def __init__(self):
-        super().__init__()
-        n = 2 ** 9
-        self.norm = GroupNorm(2 ** 5, n)
-        self.q = Conv2d(n, n, 1)
-        self.k = Conv2d(n, n, 1)
-        self.v = Conv2d(n, n, 1)
-        self.proj_out = Conv2d(n, n, 1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        n, m = 2 ** 9, x.shape[0]
-        h = x
-        h = self.norm(h)
-        q = self.q.forward(h)
-        k = self.k.forward(h)
-        v = self.v.forward(h)
-        q = q.reshape(m, n, 2 ** 8)
-        q = q.permute(0, 2, 1)
-        k = k.reshape(m, n, 2 ** 8)
-        w = torch.bmm(q, k)
-        w /= n ** 0.5
-        w = torch.softmax(w, dim=2)
-        v = v.reshape(m, n, 2 ** 8)
-        w = w.permute(0, 2, 1)
-        h = torch.bmm(v, w)
-        h = h.reshape(m, n, 2 ** 4, 2 ** 4)
-        h = self.proj_out.forward(h)
-        return x + h
-
-
-class MiddleLayer(Module):
-    def __init__(self):
-        super().__init__()
-        self.block_1 = ResnetBlock(9, 9)
-        self.attn_1 = AttentionBlock()
-        self.block_2 = ResnetBlock(9, 9)
-    
-    def forward(self, h: Tensor) -> Tensor:
-        h = self.block_1.forward(h)
-        h = self.attn_1.forward(h)
-        h = self.block_2.forward(h)
-        return h
-
-
-class Upsample(Module):
-    def __init__(self, log2_count):
-        super().__init__()
-        n = 2 ** log2_count
-        self.upsample = torch.nn.UpsamplingNearest2d(scale_factor=2)
-        self.conv = Conv2d(n, n, 3, padding=1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.upsample.forward(x.to(torch.float32))
-        x = self.conv.forward(x)
-        return x
-
-
-class UpsampleBlock(Module):
-    def __init__(
-        self, 
-        log2_count_in: int, 
-        log2_count_out: int, 
-        has_attention: bool, 
-        has_upsample: bool
-    ):
-        super().__init__()
-        self.has_attention = has_attention
-        self.has_upsample = has_upsample
-        self.block = ModuleList([
-            ResnetBlock(log2_count_in, log2_count_out),
-            ResnetBlock(log2_count_out, log2_count_out),
-            ResnetBlock(log2_count_out, log2_count_out)
-        ])
-        if has_attention:
-            self.attn = ModuleList([
-                AttentionBlock(),
-                AttentionBlock(),
-                AttentionBlock()
-            ])
-        else:
-            self.attn = ModuleList()
-
-        if has_upsample:
-            self.upsample = Upsample(log2_count_out)
-
-
-    def forward(self, h: Tensor) -> Tensor:
-        for j in range(3):
-            h = self.block[j].forward(h)
-            if self.has_attention:
-                h = self.attn[j].forward(h)
-        if self.has_upsample:
-            h = self.upsample.forward(h)
-        return h
-
-
-class Decoder(Module):
-    def __init__(self):
-        super().__init__()
-
-        self.conv_in = Conv2d(2 ** 8, 2 ** 9, 3, padding=1)
-        self.mid = MiddleLayer()
-
-        self.up = ModuleList([
-            UpsampleBlock(7, 7, False, False),
-            UpsampleBlock(8, 7, False, True),
-            UpsampleBlock(8, 8, False, True),
-            UpsampleBlock(9, 8, False, True),
-            UpsampleBlock(9, 9, True, True)
-        ])
-
-        self.norm_out = GroupNorm(2 ** 5, 2 ** 7)
-        self.conv_out = Conv2d(2 ** 7, 3, 3, padding=1)
-
-    def forward(self, z: Tensor) -> Tensor:
-        z = self.conv_in.forward(z)
-        z = self.mid.forward(z)
-
-        for i in reversed(range(5)):
-            z = self.up[i].forward(z)
-
-        z = self.norm_out.forward(z)
-        z *= torch.sigmoid(z)
-        z = self.conv_out.forward(z)
-        return z
-
-
-class VQGanDetokenizer(Module):
-    def __init__(self):
-        super().__init__()
-        m, n = 2 ** 14, 2 ** 8
-        self.embedding = Embedding(m, n)
-        self.post_quant_conv = Conv2d(n, n, 1)
-        self.decoder = Decoder()
-
-    def forward(self, z: Tensor) -> Tensor:
-        z = self.embedding.forward(z)
-        z = z.view((z.shape[0], 2 ** 4, 2 ** 4, 2 ** 8))
-        z = z.permute(0, 3, 1, 2).contiguous()
-        z = self.post_quant_conv.forward(z)
-        z = self.decoder.forward(z)
-        z = z.permute(0, 2, 3, 1)
-        z = z.clip(0.0, 1.0) * 255
-        return 
 
 import os
 from PIL import Image
 import numpy
-from torch import LongTensor
+from torch import LongTensor, FloatTensor
 import torch
+import torch.backends.cudnn, torch.backends.cuda
 import json
 import requests
 from typing import Iterator
+
 torch.set_grad_enabled(False)
-# torch.set_num_threads(os.cpu_count())
+torch.set_num_threads(os.cpu_count())
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.allow_tf32 = True
+
+MIN_DALLE_REPO = "https://huggingface.co/kuprel/min-dalle/resolve/main/"
+IMAGE_TOKEN_COUNT = 256
+
 
 class DALLE(nn.Module):
     def __init__(
@@ -625,138 +581,187 @@ class DALLE(nn.Module):
         is_reusable: bool = True,
     ):
         super().__init__()
-        self.is_reusable = is_reusable
+        if args["device"] == None:
+            args["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = args["device"]
         self.text_token_count = 64
-        self.depth = args["depth"]
+        self.layer_count = args["depth"]
         self.num_attention_heads = args["num_attention_heads"]
         self.embedding_dim = args["embedding_dim"]
         self.glu_embedding_dim = args["glu_embedding_dim"]
         self.text_vocab_len = args["text_vocab_len"]
         self.image_vocab_len = args["image_vocab_len"]
+
+        self.is_verbose = False
+        self.is_mega = False
         self.dtype = torch.float32
-        with open(args["vocab_path"], 'r', encoding='utf8') as f:
+        self.is_reusable = True
+        with open(args["vocab_path"], "r", encoding="utf8") as f:
             vocab = json.load(f)
-        with open(args["merges_path"], 'r', encoding='utf8') as f:
+        with open(args["merges_path"], "r", encoding="utf8") as f:
             merges = f.read().split("\n")[1:-1]
         self.tokenizer = TextTokenizer(vocab, merges)
-        self.encoder = DalleBartEncoder(
-            num_attention_heads = self.num_attention_heads,
-            embedding_dim = self.embedding_dim,
-            glu_embedding_dim = self.glu_embedding_dim,
-            text_token_count = self.text_token_count,
-            text_vocab_len = self.text_vocab_len,
-            depth = self.depth
+        self.encoder = (
+            DalleBartEncoder(
+                num_attention_heads=self.num_attention_heads,
+                embedding_dim=self.embedding_dim,
+                glu_embedding_dim=self.glu_embedding_dim,
+                text_token_count=self.text_token_count,
+                text_vocab_len=self.text_vocab_len,
+                layer_count=self.layer_count,
+                device=self.device,
+            )
+            .to(self.dtype)
+            .eval()
         )
-        self.decoder = DalleBartDecoder(
-            image_vocab_len = self.image_vocab_len,
-            num_attention_heads = self.num_attention_heads,
-            embedding_dim = self.embedding_dim,
-            glu_embedding_dim = self.glu_embedding_dim,
-            depth = self.depth,
-            start_token = self.image_vocab_len
+        self.decoder = (
+            DalleBartDecoder(
+                image_vocab_len=self.image_vocab_len,
+                num_attention_heads=self.num_attention_heads,
+                embedding_dim=self.embedding_dim,
+                glu_embedding_dim=self.glu_embedding_dim,
+                layer_count=self.layer_count,
+                device=self.device,
+            )
+            .to(self.dtype)
+            .eval()
         )
         self.detokenizer = VQGanDetokenizer().eval()
-        self.device = args["device"]
 
+    def image_grid_from_tokens(
+        self, image_tokens: LongTensor, is_seamless: bool, is_verbose: bool = False
+    ) -> FloatTensor:
+        if not self.is_reusable:
+            del self.decoder
+        torch.cuda.empty_cache()
+        if not self.is_reusable:
+            self.init_detokenizer()
+        if is_verbose:
+            print("detokenizing image")
+        images = self.detokenizer.forward(is_seamless, image_tokens)  # [768, 768, 3]
+        if not self.is_reusable:
+            del self.detokenizer
+        return images
 
-    def image_from_tokens(
+    def generate_raw_image_stream(
         self,
-        grid_size: int,
-        image_tokens: LongTensor,
-        is_verbose: bool = False
-    ) -> Image.Image:
-        if not self.is_reusable: del self.decoder
-        if torch.cuda.is_available(): torch.cuda.empty_cache()
-        if not self.is_reusable: self.init_detokenizer()
-        if is_verbose: print("detokenizing image")
-        images = self.detokenizer.forward(image_tokens).to(torch.uint8)
-        if not self.is_reusable: del self.detokenizer
-        all_images = []
-        for i in range(grid_size ** 2):
-            image = images[i, :] # [256, 256, 3]
-            # image = image.flatten(1, 2).transpose(0, 1).flatten(1, 2)
-            all_images.append(Image.fromarray(image.to('cpu').detach().numpy()))
-        return all_images
-
-
-    def generate_image_stream(
-        self, 
-        text: str, 
+        text: str,
         seed: int,
         grid_size: int,
-        log2_mid_count: int,
-        log2_k: int = 6,
-        log2_supercondition_factor: int = 3,
-        is_verbose: bool = False
-    ) -> Iterator[Image.Image]:
-        assert(log2_mid_count in range(5))
-        if is_verbose: print("tokenizing text")
-        tokens = self.tokenizer.tokenize(text.lower(), is_verbose=is_verbose)
-        if is_verbose: print("text tokens", tokens)
+        progressive_outputs: bool = False,
+        is_seamless: bool = False,
+        temperature: float = 1,
+        top_k: int = 256,
+        supercondition_factor: int = 16,
+        is_verbose: bool = False,
+    ) -> Iterator[FloatTensor]:
+        image_count = grid_size**2
+        if is_verbose:
+            print("tokenizing text")
+        tokens = self.tokenizer.tokenize(text, is_verbose=is_verbose)
+        if len(tokens) > self.text_token_count:
+            tokens = tokens[: self.text_token_count]
+        if is_verbose:
+            print("{} text tokens".format(len(tokens)), tokens)
         text_tokens = numpy.ones((2, 64), dtype=numpy.int32)
         text_tokens[0, :2] = [tokens[0], tokens[-1]]
-        text_tokens[1, :len(tokens)] = tokens
+        text_tokens[1, : len(tokens)] = tokens
+        text_tokens = torch.tensor(text_tokens, dtype=torch.long, device=self.device)
 
-        text_tokens = torch.tensor(text_tokens).to(torch.long)
-        text_tokens = text_tokens.to(self.device)
-
-        if not self.is_reusable: self.init_encoder()
-        if is_verbose: print("encoding text tokens")
+        if not self.is_reusable:
+            self.init_encoder()
+        if is_verbose:
+            print("encoding text tokens")
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            encoder_state = self.encoder.forward(text_tokens)
-        if not self.is_reusable: del self.encoder
-        if torch.cuda.is_available(): torch.cuda.empty_cache()
+            encoder_state = self.encoder.forward(text_tokens)  # [2, 64, 1024]
+        if not self.is_reusable:
+            del self.encoder
+        torch.cuda.empty_cache()
 
-        if not self.is_reusable: self.init_decoder()
+        if not self.is_reusable:
+            self.init_decoder()
 
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            encoder_state, attention_mask, attention_state, image_tokens = ( 
-                self.decoder.decode_initial(
-                    seed, 
-                    grid_size ** 2, 
-                    text_tokens, 
-                    encoder_state
-                )
+            expanded_indices = [0] * image_count + [1] * image_count
+            text_tokens = text_tokens[expanded_indices]
+            encoder_state = encoder_state[expanded_indices]  # [18, 64, 1024]
+            attention_mask = text_tokens.not_equal(1)
+            attention_state = torch.zeros(
+                size=(
+                    self.layer_count,
+                    image_count * 4,
+                    IMAGE_TOKEN_COUNT,
+                    self.embedding_dim,
+                ),
+                device=self.device,
+            )
+            image_tokens = torch.full(
+                (IMAGE_TOKEN_COUNT + 1, image_count),
+                self.image_vocab_len,
+                dtype=torch.long,
+                device=self.device,
             )
 
-        row_count = 16
-        for row_index in range(row_count):
-            if is_verbose: 
-                print('sampling row {} of {}'.format(row_index + 1, row_count))
-            with torch.cuda.amp.autocast(dtype=self.dtype):
-                attention_state, image_tokens = self.decoder.decode_row(
-                    row_index,
-                    log2_k,
-                    log2_supercondition_factor,
-                    encoder_state,
-                    attention_mask,
-                    attention_state,
-                    image_tokens
-                )
-            with torch.cuda.amp.autocast(dtype=torch.float32):
-                if ((row_index + 1) * (2 ** log2_mid_count)) % row_count == 0:
-                    tokens = image_tokens[:, 1:]
-                    image = self.image_from_tokens(grid_size, tokens, is_verbose)
+            if seed > 0:
+                torch.manual_seed(seed)
 
-        return image
+        token_indices = torch.arange(IMAGE_TOKEN_COUNT, device=self.device)
+        settings = torch.tensor(
+            [temperature, top_k, supercondition_factor],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        for i in range(IMAGE_TOKEN_COUNT):
+            torch.cuda.empty_cache()
+            with torch.cuda.amp.autocast(dtype=self.dtype):
+                image_tokens[i + 1], attention_state = self.decoder.forward(
+                    settings=settings,
+                    attention_mask=attention_mask,
+                    encoder_state=encoder_state,
+                    attention_state=attention_state,
+                    prev_tokens=image_tokens[i],
+                    token_index=token_indices[[i]],
+                )
+
+            with torch.cuda.amp.autocast(dtype=torch.float32):
+                if ((i + 1) % 32 == 0 and progressive_outputs) or i + 1 == 256:
+                    yield self.image_grid_from_tokens(
+                        image_tokens=image_tokens[1:].T,
+                        is_seamless=is_seamless,
+                        is_verbose=is_verbose,
+                    )
 
     def forward(
-        self, 
+        self,
         text: str,
         seed: int = -1,
         grid_size: int = 1,
-        log2_k: int = 6,
         log2_supercondition_factor: int = 3,
-        is_verbose: bool = False
+        grid: bool = False,
     ) -> Image.Image:
         log2_mid_count = 0
-        image = self.generate_image_stream(
-            text,
-            seed,
-            grid_size,
-            log2_mid_count,
-            log2_k,
-            log2_supercondition_factor,
-            is_verbose
-        )
-        return image
+        all_images = []
+        image_stream = self.generate_raw_image_stream(text, seed, grid_size=grid_size)
+        if grid:
+            for image in image_stream:
+                return [
+                    Image.fromarray(image.to(torch.uint8).to("cpu").detach().numpy())
+                ]
+        else:
+            all_images = []
+            for image in image_stream:
+                image = image.view(
+                    [grid_size * IMAGE_TOKEN_COUNT, grid_size, IMAGE_TOKEN_COUNT, -1]
+                )
+                image = image.transpose(1, 0)
+                image = image.reshape(
+                    [grid_size**2, IMAGE_TOKEN_COUNT, IMAGE_TOKEN_COUNT, -1]
+                )
+                for i in range(grid_size**2):
+                    selected_image = image[i, :]
+                    all_images.append(
+                        Image.fromarray(
+                            selected_image.to(torch.uint8).to("cpu").detach().numpy()
+                        )
+                    )
+            return all_images
