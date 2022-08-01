@@ -68,7 +68,6 @@ images = model(
     seed=-1,
     grid_size=3,
     grid=True,
-    log2_supercondition_factor=8,
 )
 
 for idx, one in enumerate(images):

@@ -737,15 +737,18 @@ class DALLE(nn.Module):
         seed: int = -1,
         grid_size: int = 1,
         log2_supercondition_factor: int = 4,
+        temperature: float = 1.0,
+        top_k: int = 256,
         grid: bool = False,
     ) -> Image.Image:
-        log2_mid_count = 0
         all_images = []
         image_stream = self.generate_raw_image_stream(
             text=text,
             seed=seed,
             grid_size=grid_size,
             log2_supercondition_factor=log2_supercondition_factor,
+            temperature=temperature,
+            top_k=top_k,
         )
         if grid:
             for image in image_stream:
