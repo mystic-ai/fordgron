@@ -64,7 +64,7 @@ model.decoder.load_state_dict(
 
 model.detokenizer.load_state_dict(torch.load("./will-dalle-files/detokenizer.pt"))
 
-text = "george washington eating battenburg cake anime"
+text = "horse running on the beach"
 
 tokenizer = BartTokenizerFast(
     vocab_file="./will-dalle-files/mini/vocab.json",
