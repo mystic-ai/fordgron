@@ -1,3 +1,5 @@
+# based on huggingface's `transformers` implementation of GPT-J
+
 from fordgron.model.gpt_j import GPTJForCausalLM
 import time
 import torch
